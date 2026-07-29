@@ -10,6 +10,7 @@ mod pixels;
 mod probe;
 mod service;
 mod testbed;
+mod timing;
 mod x11;
 
 pub use error::{Error, Result};
@@ -17,4 +18,5 @@ pub use pixels::{Frame, Quiet};
 pub use probe::{Anchor, JsonProbe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
-pub use x11::{Button, Key, Window, X11Controller};
+pub use timing::{ActionReceipt, PerformanceBudget, PerformanceEndpoint, Timed};
+pub use x11::{Button, Drag, Key, Modifiers, Window, WindowQuery, X11Controller, X11Session};

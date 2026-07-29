@@ -1,7 +1,10 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
+    collections::BTreeSet,
     ffi::OsString,
     fs,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -12,7 +15,8 @@ use std::{
 use tempfile::TempDir;
 
 use crate::{
-    AppCommand, Application, Error, Result, X11Controller, error::io, x11::connect_authenticated,
+    AppCommand, Application, Error, Result, WindowQuery, X11Controller, X11Session, error::io,
+    service::UserBus, x11::connect_authenticated,
 };
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -79,7 +83,7 @@ impl TestbedBuilder {
         self
     }
 
-    /// Directory into which the harness copies curated diagnostics on panic.
+    /// Directory into which the harness copies curated diagnostics on failure.
     ///
     /// This directory is never visible inside the application sandbox.
     #[must_use]
@@ -92,6 +96,7 @@ impl TestbedBuilder {
         for tool in ["bwrap", "systemd-run", "systemctl"] {
             require_tool(tool)?;
         }
+        let user_bus = UserBus::discover()?;
         let ordinal = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let id = format!("{}-{ordinal}", std::process::id());
         let root = tempfile::Builder::new()
@@ -103,6 +108,8 @@ impl TestbedBuilder {
             "home",
             "tmp",
             "logs",
+            "captures",
+            "diagnostics",
             "probes",
             "xdg/config",
             "xdg/cache",
@@ -122,7 +129,23 @@ impl TestbedBuilder {
             id,
             next_app: AtomicU64::new(1),
             failure_artifacts: self.failure_artifacts,
+            retained: RefCell::new(BTreeSet::new()),
+            user_bus,
         })
+    }
+
+    /// Run a complete scenario, retaining diagnostics for both `Err` and panic.
+    pub fn run<T>(self, scenario: impl FnOnce(&Testbed) -> Result<T>) -> Result<T> {
+        let testbed = self.raise()?;
+        let verdict = catch_unwind(AssertUnwindSafe(|| scenario(&testbed)));
+        match verdict {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(err)) => {
+                testbed.export_failure_best_effort();
+                Err(err)
+            }
+            Err(payload) => resume_unwind(payload),
+        }
     }
 }
 
@@ -135,6 +158,8 @@ pub struct Testbed {
     id: String,
     next_app: AtomicU64,
     failure_artifacts: Option<PathBuf>,
+    retained: RefCell<BTreeSet<PathBuf>>,
+    user_bus: UserBus,
 }
 
 impl std::fmt::Debug for Testbed {
@@ -228,6 +253,17 @@ impl Testbed {
         }
     }
 
+    pub fn x11_session<'app, 'bed>(
+        &'bed self,
+        app: &'app Application<'bed>,
+        query: impl Into<WindowQuery>,
+        timeout: Duration,
+    ) -> Result<X11Session<'app, 'bed>> {
+        let controller = self.x11()?;
+        let window = controller.wait_window_query(app, query, timeout)?;
+        X11Session::forge(self, app, controller, window)
+    }
+
     /// Capture the complete virtual Wayland output through Weston's output
     /// capture protocol.
     pub fn capture_wayland(&self) -> Result<crate::Frame> {
@@ -255,6 +291,14 @@ impl Testbed {
             .map_err(|err| io("export private artifact", destination, err))
     }
 
+    /// Include one private file or tree in failure diagnostics.
+    pub fn retain_on_failure(&self, relative: impl AsRef<Path>) -> Result<()> {
+        let relative = relative.as_ref();
+        validate_relative(relative)?;
+        let _inserted = self.retained.borrow_mut().insert(relative.to_owned());
+        Ok(())
+    }
+
     pub(crate) fn host_path(&self, relative: impl AsRef<Path>) -> PathBuf {
         self.root.path().join(relative)
     }
@@ -263,35 +307,44 @@ impl Testbed {
         &self.display
     }
 
-    fn export_failure_logs(&self, sink: &Path) -> Result<()> {
+    pub(crate) fn user_command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
+        self.user_bus.command(program)
+    }
+
+    pub(crate) fn diagnostic_path(&self, relative: impl AsRef<Path>) -> PathBuf {
+        self.host_path(Path::new("diagnostics").join(relative))
+    }
+
+    fn export_failure_artifacts(&self, sink: &Path) -> Result<()> {
         let target = sink.join(&self.id);
         fs::create_dir_all(&target)
             .map_err(|err| io("create failure artifact directory", &target, err))?;
-        for entry in fs::read_dir(self.host_path("logs"))
-            .map_err(|err| io("read private logs", self.host_path("logs"), err))?
+        for relative in ["logs", "probes", "captures", "diagnostics"]
+            .into_iter()
+            .map(PathBuf::from)
+            .chain(self.retained.borrow().iter().cloned())
         {
-            let entry =
-                entry.map_err(|err| io("read private log entry", self.host_path("logs"), err))?;
-            if entry
-                .file_type()
-                .map_err(|err| io("inspect private log", entry.path(), err))?
-                .is_file()
-            {
-                let destination = target.join(entry.file_name());
-                let _bytes = fs::copy(entry.path(), &destination)
-                    .map_err(|err| io("export failure log", destination, err))?;
+            let source = self.host_path(&relative);
+            if source.exists() {
+                copy_tree(&source, &target.join(relative))?;
             }
         }
         Ok(())
+    }
+
+    fn export_failure_best_effort(&self) {
+        if let Some(sink) = &self.failure_artifacts
+            && let Err(err) = self.export_failure_artifacts(sink)
+        {
+            eprintln!("egui-tester could not retain failure artifacts: {err}");
+        }
     }
 }
 
 impl Drop for Testbed {
     fn drop(&mut self) {
-        if thread::panicking()
-            && let Some(sink) = &self.failure_artifacts
-        {
-            let _ignored = self.export_failure_logs(sink);
+        if thread::panicking() {
+            self.export_failure_best_effort();
         }
     }
 }
@@ -752,4 +805,33 @@ fn harden_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|err| io("harden private file", path, err))
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+    let metadata =
+        fs::symlink_metadata(source).map_err(|err| io("inspect failure artifact", source, err))?;
+    if metadata.file_type().is_symlink() {
+        return Err(Error::Containment {
+            layer: "failure artifacts",
+            detail: format!("refusing to follow symlink `{}`", source.display()),
+        });
+    }
+    if metadata.is_file() {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| io("create failure artifact parent", parent, err))?;
+        }
+        let _bytes = fs::copy(source, destination)
+            .map_err(|err| io("copy failure artifact", destination, err))?;
+        return Ok(());
+    }
+    fs::create_dir_all(destination)
+        .map_err(|err| io("create failure artifact tree", destination, err))?;
+    for entry in
+        fs::read_dir(source).map_err(|err| io("read failure artifact tree", source, err))?
+    {
+        let entry = entry.map_err(|err| io("read failure artifact entry", source, err))?;
+        copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
 }

@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "booru-acceptance"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "egui-tester",
 ]
@@ -820,9 +820,12 @@ dependencies = [
 
 [[package]]
 name = "egui-tester"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "bitflags 2.13.1",
+ "egui-tester-witness",
  "png",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -832,14 +835,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-tester-doctor"
+version = "0.2.0"
+dependencies = [
+ "egui-tester",
+]
+
+[[package]]
 name = "egui-tester-fixture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui-tester",
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "egui-tester-witness"
+version = "0.2.0"
+dependencies = [
+ "egui",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -947,6 +968,7 @@ dependencies = [
  "bytemuck",
  "ecolor",
  "emath",
+ "epaint_default_fonts",
  "font-types",
  "log",
  "nohash-hasher",
@@ -957,6 +979,12 @@ dependencies = [
  "smallvec",
  "vello_cpu",
 ]
+
+[[package]]
+name = "epaint_default_fonts"
+version = "0.34.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8970033a4282a7bcf899b38b5ed3a58b732fe093d03785d58648515d8d309da"
 
 [[package]]
 name = "equivalent"

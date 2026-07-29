@@ -38,11 +38,11 @@ fn main() -> Result<()> {
     x11.focus(&window)?;
     let mut probe = JsonProbe::new(&probe_path);
     let recess = probe.wait_anchor(&app, "recess:ui", Duration::from_secs(10))?;
-    let closed = x11.wait_quiet(&window, Quiet::default())?;
+    let closed = x11.wait_quiet(&app, &window, Quiet::default())?;
     let (x, y) = recess.center();
-    x11.click(&window, x, y, Button::Primary)?;
+    let _receipt = x11.click(&window, x, y, Button::Primary)?;
     let dry = probe.wait_anchor(&app, "water:dry", Duration::from_secs(5))?;
-    let open = x11.wait_quiet(&window, Quiet::default())?;
+    let open = x11.wait_quiet(&app, &window, Quiet::default())?;
     demand(
         closed.difference(&open, 2)? > 0.001,
         "opening the UI recess did not alter rendered pixels",
@@ -50,14 +50,14 @@ fn main() -> Result<()> {
 
     let wet = probe.wait_anchor(&app, "water:wet", Duration::from_secs(3))?;
     let (x, y) = wet.center();
-    x11.click(&window, x, y, Button::Primary)?;
+    let _receipt = x11.click(&window, x, y, Button::Primary)?;
     let _wet_frame = probe.wait(
         &app,
         Duration::from_secs(3),
         "booru water mode to become wet",
         |frame| state_is(frame, "water", "wet"),
     )?;
-    let animated = x11.wait_changed(&window, &open, 0.001, 2, Duration::from_secs(5))?;
+    let animated = x11.wait_changed(&app, &window, &open, 0.001, 2, Duration::from_secs(5))?;
     demand(
         open.difference(&animated, 2)? > 0.001,
         "wet mode changed the witness but not the product pixels",
@@ -92,7 +92,7 @@ fn main() -> Result<()> {
         detail: "persisted open UI lost its dry-mode control".to_owned(),
     })?;
     let (x, y) = dry.center();
-    x11.click(&window, x, y, Button::Primary)?;
+    let _receipt = x11.click(&window, x, y, Button::Primary)?;
     let _dry_frame = probe.wait(
         &restarted,
         Duration::from_secs(3),
@@ -100,6 +100,7 @@ fn main() -> Result<()> {
         |frame| state_is(frame, "water", "dry"),
     )?;
     let _settled = x11.wait_quiet(
+        &restarted,
         &window,
         Quiet {
             timeout: Duration::from_secs(8),

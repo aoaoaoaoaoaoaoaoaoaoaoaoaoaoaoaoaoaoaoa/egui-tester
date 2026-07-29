@@ -1,23 +1,22 @@
 [package]
-name = "egui-tester"
-description = "Hermetic end-to-end harness for native egui applications"
+name = "egui-tester-witness"
+description = "One-way semantic witness protocol for egui-tester applications"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+egui = ["dep:egui"]
+
 [dependencies]
-bitflags.workspace = true
-egui-tester-witness.workspace = true
-png.workspace = true
+egui = { workspace = true, optional = true }
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
-x11rb.workspace = true
-xkeysym.workspace = true
 
 [lints]
 workspace = true

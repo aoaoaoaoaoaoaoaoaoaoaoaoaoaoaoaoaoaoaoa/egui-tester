@@ -34,6 +34,16 @@ pub enum Error {
     #[error("timed out after {timeout:?} waiting for {waiting}")]
     Timeout { waiting: String, timeout: Duration },
 
+    #[error("performance budget breached for {operation}: observed {elapsed:?}, budget {budget:?}")]
+    TooSlow {
+        operation: String,
+        budget: Duration,
+        elapsed: Duration,
+    },
+
+    #[error("invalid performance observation for {operation}: {detail}")]
+    Timing { operation: String, detail: String },
+
     #[error("X11 protocol failure while {operation}: {detail}")]
     X11 {
         operation: &'static str,

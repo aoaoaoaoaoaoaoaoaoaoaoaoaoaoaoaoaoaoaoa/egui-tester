@@ -82,8 +82,10 @@ fn audit_denial(path: &Path) -> ! {
 struct Fixture {
     probe: Option<PathBuf>,
     count: u64,
+    f2_count: u64,
     violet: bool,
     text: String,
+    drag_value: f32,
 }
 
 impl Fixture {
@@ -91,14 +93,19 @@ impl Fixture {
         Self {
             probe: std::env::var_os("EGUI_TESTER_PROBE").map(PathBuf::from),
             count: 0,
+            f2_count: 0,
             violet: false,
             text: String::new(),
+            drag_value: 0.0,
         }
     }
 }
 
 impl eframe::App for Fixture {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if ui.input(|input| input.key_pressed(egui::Key::F2)) {
+            self.f2_count = self.f2_count.saturating_add(1);
+        }
         let fill = if self.violet {
             Color32::from_rgb(74, 28, 126)
         } else {
@@ -123,6 +130,8 @@ impl eframe::App for Fixture {
             let text = ui.text_edit_singleline(&mut self.text);
             anchors.push(anchor("text", text.rect));
             text_focused = text.has_focus();
+            let drag = ui.add(egui::Slider::new(&mut self.drag_value, 0.0..=100.0));
+            anchors.push(anchor("drag", drag.rect));
         });
         if let Some(path) = &self.probe {
             let probe = Probe {
@@ -130,9 +139,11 @@ impl eframe::App for Fixture {
                 anchors,
                 state: State {
                     count: self.count,
+                    f2_count: self.f2_count,
                     violet: self.violet,
                     text: &self.text,
                     text_focused,
+                    drag_value: self.drag_value,
                 },
             };
             if let Ok(bytes) = serde_json::to_vec(&probe) {
@@ -158,9 +169,11 @@ struct Anchor {
 #[derive(Serialize)]
 struct State<'a> {
     count: u64,
+    f2_count: u64,
     violet: bool,
     text: &'a str,
     text_focused: bool,
+    drag_value: f32,
 }
 
 fn anchor(name: &'static str, rect: egui::Rect) -> Anchor {

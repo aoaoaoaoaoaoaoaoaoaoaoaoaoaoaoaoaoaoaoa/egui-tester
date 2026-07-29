@@ -73,8 +73,36 @@ states a predicate:
 - enough pixels differ from a baseline
 - sufficiently few pixels differ for N consecutive samples
 
-Frame-built witnesses precede presentation. Therefore a witness transition may
-release a subsequent pixel-change wait, but must never substitute for it.
+The standard witness is published only after its product frame is presented.
+Its semantic state and anchors must describe one coherent egui pass. A
+transition predicate should therefore require both the new state and a control
+that belongs to that state; this prevents a late-pass state mutation from
+making preceding-layout anchors appear current.
+
+A witness transition still must not substitute for a product verdict. It may
+release a subsequent pixel or external-oracle wait.
+
+## Performance
+
+Every native input operation may return an `ActionReceipt` stamped immediately
+before XTEST injection. A standard witness carries two timestamps from the
+same `CLOCK_MONOTONIC` epoch:
+
+1. `observed_ns`, captured after product-state work and before witness work;
+2. `presented_ns`, captured immediately after the corresponding real frame is
+   presented.
+
+The adapter collects anchors, constructs test-only state, serializes JSON, and
+atomically publishes only after both timestamps exist. Harness polling,
+screenshots, and filesystem latency are therefore outside both verdicts.
+`PerformanceBudget` defaults to observation and may opt into presentation.
+Its functional timeout bounds a missing result but never dilates the
+production threshold.
+
+Run performance acceptance against an optimized product binary. Software
+graphics is a conservative presentation environment; use
+`Graphics::Host` only when the question specifically requires representative
+GPU timing. Never invent an “instrumented build multiplier.”
 
 ## Wayland
 

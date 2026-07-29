@@ -2,6 +2,7 @@ use std::{
     cell::Cell,
     collections::BTreeMap,
     ffi::{OsStr, OsString},
+    os::unix::fs::FileTypeExt as _,
     path::{Component, Path, PathBuf},
     process::{Command, Output},
     thread,
@@ -9,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    Error, Result,
+    Error, JsonProbe, Result,
     error::io,
     testbed::{DisplaySeal, Testbed},
 };
@@ -47,6 +48,7 @@ pub struct AppCommand {
     network: Network,
     graphics: Graphics,
     runtime: Duration,
+    witness: Option<PathBuf>,
 }
 
 impl AppCommand {
@@ -61,6 +63,7 @@ impl AppCommand {
             network: Network::Deny,
             graphics: Graphics::Software,
             runtime: Duration::from_mins(2),
+            witness: None,
         }
     }
 
@@ -129,6 +132,20 @@ impl AppCommand {
         self.runtime = runtime;
         self
     }
+
+    /// Arm the standard one-way witness at a private `/test` path.
+    #[must_use]
+    pub fn witness(mut self, relative: impl AsRef<Path>) -> Self {
+        let relative = relative.as_ref();
+        if !confined_relative(relative) {
+            self.violations.push(format!(
+                "witness path `{}` is not confined",
+                relative.display()
+            ));
+        }
+        self.witness = Some(relative.to_owned());
+        self
+    }
 }
 
 /// Exit facts retained by the transient service.
@@ -152,8 +169,9 @@ pub struct Application<'a> {
     unit: String,
     stdout: PathBuf,
     stderr: PathBuf,
+    witness: Option<WitnessSeal>,
     stopped: Cell<bool>,
-    _testbed: &'a Testbed,
+    testbed: &'a Testbed,
 }
 
 impl std::fmt::Debug for Application<'_> {
@@ -163,6 +181,7 @@ impl std::fmt::Debug for Application<'_> {
             .field("unit", &self.unit)
             .field("stdout", &self.stdout)
             .field("stderr", &self.stderr)
+            .field("witness", &self.witness)
             .finish_non_exhaustive()
     }
 }
@@ -197,9 +216,25 @@ impl<'a> Application<'a> {
         let stderr = testbed.host_path(format!("logs/app-{ordinal}.stderr"));
         create_empty(&stdout)?;
         create_empty(&stderr)?;
+        let witness = command.witness.as_ref().map(|relative| WitnessSeal {
+            host: testbed.host_path(relative),
+            guest: Path::new(GUEST_ROOT).join(relative),
+            launch: format!("{}-{ordinal}", testbed.id()),
+        });
+        if let Some(witness) = &witness {
+            if let Some(parent) = witness.host.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|err| io("create witness parent", parent, err))?;
+            }
+            match std::fs::remove_file(&witness.host) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(io("remove stale witness", &witness.host, err)),
+            }
+        }
 
-        let bwrap = bwrap_argv(testbed, &command, &binary, &borrows)?;
-        let mut systemd = Command::new("systemd-run");
+        let bwrap = bwrap_argv(testbed, &command, &binary, &borrows, witness.as_ref())?;
+        let mut systemd = testbed.user_command("systemd-run");
         let _command = systemd
             .args([
                 "--user",
@@ -259,8 +294,9 @@ impl<'a> Application<'a> {
             unit,
             stdout,
             stderr,
+            witness,
             stopped: Cell::new(false),
-            _testbed: testbed,
+            testbed,
         };
         Ok(app)
     }
@@ -278,6 +314,19 @@ impl<'a> Application<'a> {
     #[must_use]
     pub fn stderr_path(&self) -> &Path {
         &self.stderr
+    }
+
+    pub fn witness(&self) -> Result<JsonProbe> {
+        let seal = self.witness.as_ref().ok_or_else(|| Error::Unsupported {
+            capability: "standard witness",
+            detail: "launch the application with AppCommand::witness".to_owned(),
+        })?;
+        Ok(JsonProbe::sealed(&seal.host, &seal.launch))
+    }
+
+    #[must_use]
+    pub fn witness_path(&self) -> Option<&Path> {
+        self.witness.as_ref().map(|seal| seal.host.as_path())
     }
 
     pub fn ensure_running(&self, waiting: impl Into<String>) -> Result<()> {
@@ -351,7 +400,9 @@ impl<'a> Application<'a> {
         if self.stopped.replace(true) {
             return Ok(());
         }
-        let output = Command::new("systemctl")
+        let output = self
+            .testbed
+            .user_command("systemctl")
             .args(["--user", "stop", &self.unit])
             .output()
             .map_err(|err| io("stop application service", "systemctl", err))?;
@@ -365,12 +416,14 @@ impl<'a> Application<'a> {
                 ),
             });
         }
-        reset_unit(&self.unit);
+        reset_unit(self.testbed, &self.unit);
         Ok(())
     }
 
     fn status(&self) -> Result<UnitStatus> {
-        let output = Command::new("systemctl")
+        let output = self
+            .testbed
+            .user_command("systemctl")
             .args([
                 "--user",
                 "show",
@@ -399,10 +452,12 @@ impl<'a> Application<'a> {
 impl Drop for Application<'_> {
     fn drop(&mut self) {
         if !self.stopped.get() {
-            let _ignored = Command::new("systemctl")
+            let _ignored = self
+                .testbed
+                .user_command("systemctl")
                 .args(["--user", "stop", &self.unit])
                 .status();
-            reset_unit(&self.unit);
+            reset_unit(self.testbed, &self.unit);
         }
     }
 }
@@ -446,6 +501,7 @@ fn bwrap_argv(
     command: &AppCommand,
     binary: &Path,
     borrows: &[ReadOnlyMount],
+    witness: Option<&WitnessSeal>,
 ) -> Result<Vec<OsString>> {
     let mut args = [
         "/usr/bin/bwrap",
@@ -529,7 +585,7 @@ fn bwrap_argv(
             borrow.guest.as_os_str().to_owned(),
         ]);
     }
-    let environment = sealed_environment(testbed, command);
+    let environment = sealed_environment(testbed, command, witness);
     for (key, value) in environment {
         args.extend([OsString::from("--setenv"), key, value]);
     }
@@ -543,7 +599,11 @@ fn bwrap_argv(
     Ok(args)
 }
 
-fn sealed_environment(testbed: &Testbed, command: &AppCommand) -> BTreeMap<OsString, OsString> {
+fn sealed_environment(
+    testbed: &Testbed,
+    command: &AppCommand,
+    witness: Option<&WitnessSeal>,
+) -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::from([
         (OsString::from("PATH"), OsString::from("/usr/bin")),
         (OsString::from("HOME"), OsString::from("/test/home")),
@@ -587,6 +647,18 @@ fn sealed_environment(testbed: &Testbed, command: &AppCommand) -> BTreeMap<OsStr
             (OsString::from("LIBGL_ALWAYS_SOFTWARE"), OsString::from("1")),
         ]);
     }
+    if let Some(witness) = witness {
+        env.extend([
+            (
+                OsString::from(egui_tester_witness::PATH_ENV),
+                witness.guest.as_os_str().to_owned(),
+            ),
+            (
+                OsString::from(egui_tester_witness::LAUNCH_ENV),
+                OsString::from(&witness.launch),
+            ),
+        ]);
+    }
     env.extend(command.env.clone());
     env
 }
@@ -612,7 +684,7 @@ fn lavapipe_root() -> Result<PathBuf> {
 }
 
 fn validate_command(command: &AppCommand) -> Result<()> {
-    const RESERVED: [&str; 12] = [
+    const RESERVED: [&str; 14] = [
         "DISPLAY",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
@@ -625,6 +697,8 @@ fn validate_command(command: &AppCommand) -> Result<()> {
         "XDG_RUNTIME_DIR",
         "DBUS_SESSION_BUS_ADDRESS",
         "DBUS_SYSTEM_BUS_ADDRESS",
+        egui_tester_witness::PATH_ENV,
+        egui_tester_witness::LAUNCH_ENV,
     ];
     if let Some(detail) = command.violations.first() {
         return Err(Error::Containment {
@@ -747,10 +821,92 @@ fn tail(path: &Path, limit: usize) -> String {
     text[start..].trim().to_owned()
 }
 
-fn reset_unit(unit: &str) {
-    let _ignored = Command::new("systemctl")
+fn reset_unit(testbed: &Testbed, unit: &str) {
+    let _ignored = testbed
+        .user_command("systemctl")
         .args(["--user", "reset-failed", unit])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct UserBus {
+    runtime: OsString,
+    address: OsString,
+}
+
+impl UserBus {
+    pub(crate) fn discover() -> Result<Self> {
+        let canonical = PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()));
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or(canonical);
+        let metadata = std::fs::metadata(&runtime)
+            .map_err(|err| io("inspect user runtime directory", &runtime, err))?;
+        if !metadata.is_dir() {
+            return Err(Error::Containment {
+                layer: "systemd user manager",
+                detail: format!("XDG runtime `{}` is not a directory", runtime.display()),
+            });
+        }
+        let bus = runtime.join("bus");
+        let metadata =
+            std::fs::metadata(&bus).map_err(|err| io("inspect user session bus", &bus, err))?;
+        if !metadata.file_type().is_socket() {
+            return Err(Error::Containment {
+                layer: "systemd user manager",
+                detail: format!("canonical user bus `{}` is not a socket", bus.display()),
+            });
+        }
+        let address = std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
+            .unwrap_or_else(|| OsString::from(format!("unix:path={}", bus.display())));
+        let user_bus = Self {
+            runtime: runtime.into_os_string(),
+            address,
+        };
+        user_bus.verify()?;
+        Ok(user_bus)
+    }
+
+    pub(crate) fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        let mut command = Command::new(program.as_ref());
+        let _command = command
+            .env("XDG_RUNTIME_DIR", &self.runtime)
+            .env("DBUS_SESSION_BUS_ADDRESS", &self.address);
+        command
+    }
+
+    fn verify(&self) -> Result<()> {
+        let mut command = self.command("systemctl");
+        let output = command
+            .args(["--user", "show-environment"])
+            .output()
+            .map_err(|err| io("contact systemd user manager", "systemctl", err))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(Error::Containment {
+            layer: "systemd user manager",
+            detail: format!(
+                "canonical user bus exists but `systemctl --user` failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WitnessSeal {
+    host: PathBuf,
+    guest: PathBuf,
+    launch: String,
+}
+
+fn confined_relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }

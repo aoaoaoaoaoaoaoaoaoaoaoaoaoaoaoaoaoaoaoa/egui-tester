@@ -1,7 +1,10 @@
 use std::{
+    cell::RefCell,
     collections::VecDeque,
+    fs::File,
+    io::{BufWriter, Write as _},
     os::unix::net::UnixStream,
-    path::Path,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
@@ -22,7 +25,9 @@ use x11rb::{
 };
 use xkeysym::Keysym;
 
-use crate::{Application, Error, Frame, Quiet, Result, pixels::wait_quiet};
+use crate::{
+    ActionReceipt, Application, Error, Frame, JsonProbe, Quiet, Result, Testbed, pixels::wait_quiet,
+};
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
 
@@ -33,6 +38,17 @@ pub enum Button {
     Primary = 1,
     Middle = 2,
     Secondary = 3,
+}
+
+bitflags::bitflags! {
+    /// Keyboard modifiers held around one atomic input gesture.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct Modifiers: u8 {
+        const SHIFT = 1 << 0;
+        const CTRL = 1 << 1;
+        const ALT = 1 << 2;
+        const SUPER = 1 << 3;
+    }
 }
 
 /// Portable key subset plus Latin-1 characters.
@@ -50,6 +66,78 @@ pub enum Key {
     Right,
     Up,
     Down,
+    Function(u8),
+    Shift,
+    Control,
+    Alt,
+    Super,
+}
+
+/// Human-like pointer drag policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Drag {
+    pub button: Button,
+    /// Time allowed for the application to acquire the pressed target before motion.
+    pub press_duration: Duration,
+    pub steps: u16,
+    /// Total time spent transporting the pointer after acquisition.
+    pub duration: Duration,
+}
+
+impl Default for Drag {
+    fn default() -> Self {
+        Self {
+            button: Button::Primary,
+            press_duration: Duration::from_millis(32),
+            steps: 8,
+            duration: Duration::from_millis(120),
+        }
+    }
+}
+
+/// Top-level window selection law.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WindowQuery {
+    TitleContains(String),
+    TitleExact(String),
+}
+
+impl WindowQuery {
+    #[must_use]
+    pub fn title_contains(fragment: impl Into<String>) -> Self {
+        Self::TitleContains(fragment.into())
+    }
+
+    #[must_use]
+    pub fn title_exact(title: impl Into<String>) -> Self {
+        Self::TitleExact(title.into())
+    }
+
+    fn matches(&self, title: &str) -> bool {
+        match self {
+            Self::TitleContains(fragment) => title.contains(fragment),
+            Self::TitleExact(expected) => title == expected,
+        }
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::TitleContains(fragment) => format!("title containing `{fragment}`"),
+            Self::TitleExact(title) => format!("title `{title}`"),
+        }
+    }
+}
+
+impl From<&str> for WindowQuery {
+    fn from(fragment: &str) -> Self {
+        Self::title_contains(fragment)
+    }
+}
+
+impl From<String> for WindowQuery {
+    fn from(fragment: String) -> Self {
+        Self::TitleContains(fragment)
+    }
 }
 
 /// A real top-level X11 window.
@@ -109,15 +197,26 @@ impl X11Controller {
         title_fragment: &str,
         timeout: Duration,
     ) -> Result<Window> {
+        self.wait_window_query(app, WindowQuery::title_contains(title_fragment), timeout)
+    }
+
+    pub fn wait_window_query(
+        &self,
+        app: &Application<'_>,
+        query: impl Into<WindowQuery>,
+        timeout: Duration,
+    ) -> Result<Window> {
+        let query = query.into();
+        let description = query.description();
         let deadline = Instant::now() + timeout;
         loop {
-            app.ensure_running(format!("window containing `{title_fragment}`"))?;
-            if let Some(window) = self.find_window(title_fragment)? {
+            app.ensure_running(format!("window with {description}"))?;
+            if let Some(window) = self.find_windows(&query)?.into_iter().next() {
                 return Ok(window);
             }
             if Instant::now() >= deadline {
                 return Err(Error::Timeout {
-                    waiting: format!("X11 window containing `{title_fragment}`"),
+                    waiting: format!("X11 window with {description}"),
                     timeout,
                 });
             }
@@ -126,10 +225,18 @@ impl X11Controller {
     }
 
     pub fn find_window(&self, title_fragment: &str) -> Result<Option<Window>> {
+        Ok(self
+            .find_windows(&WindowQuery::title_contains(title_fragment))?
+            .into_iter()
+            .next())
+    }
+
+    pub fn find_windows(&self, query: &WindowQuery) -> Result<Vec<Window>> {
         let root = self.root();
         let net_name = self.atom("_NET_WM_NAME")?;
         let utf8 = self.atom("UTF8_STRING")?;
         let mut queue = VecDeque::from([root]);
+        let mut matches = Vec::new();
         while let Some(parent) = queue.pop_front() {
             let tree = self
                 .connection
@@ -139,15 +246,15 @@ impl X11Controller {
                 .map_err(|err| x11("query window tree", err))?;
             for child in tree.children {
                 if let Some(title) = self.window_title(child, net_name, utf8)?
-                    && title.contains(title_fragment)
+                    && query.matches(&title)
                     && self.window_viewable(child)?
                 {
-                    return Ok(Some(Window { id: child, title }));
+                    matches.push(Window { id: child, title });
                 }
                 queue.push_back(child);
             }
         }
-        Ok(None)
+        Ok(matches)
     }
 
     pub fn focus(&self, window: &Window) -> Result<()> {
@@ -181,44 +288,184 @@ impl X11Controller {
         self.flush("move pointer")
     }
 
-    pub fn click(&self, window: &Window, x: i16, y: i16, button: Button) -> Result<()> {
-        self.move_to(window, x, y)?;
-        self.fake(BUTTON_PRESS_EVENT, button as u8, 0, 0)?;
-        self.fake(BUTTON_RELEASE_EVENT, button as u8, 0, 0)?;
-        self.flush("click pointer")
+    pub fn click(&self, window: &Window, x: i16, y: i16, button: Button) -> Result<ActionReceipt> {
+        self.modified_click(window, x, y, button, Modifiers::empty())
     }
 
-    pub fn scroll(&self, window: &Window, x: i16, y: i16, vertical_ticks: i32) -> Result<()> {
+    pub fn modified_click(
+        &self,
+        window: &Window,
+        x: i16,
+        y: i16,
+        button: Button,
+        modifiers: Modifiers,
+    ) -> Result<ActionReceipt> {
         self.move_to(window, x, y)?;
+        let receipt = ActionReceipt::begin(format!("{modifiers:?} {button:?} click at ({x}, {y})"));
+        let held = self.press_modifiers(modifiers)?;
+        let result = (|| {
+            self.fake(BUTTON_PRESS_EVENT, button as u8, 0, 0)?;
+            self.fake(BUTTON_RELEASE_EVENT, button as u8, 0, 0)
+        })();
+        self.release_keycodes(&held);
+        result?;
+        self.flush("click pointer").map(|()| receipt)
+    }
+
+    pub fn button_down(
+        &self,
+        window: &Window,
+        x: i16,
+        y: i16,
+        button: Button,
+    ) -> Result<ActionReceipt> {
+        self.move_to(window, x, y)?;
+        let receipt = ActionReceipt::begin(format!("{button:?} down at ({x}, {y})"));
+        self.fake(BUTTON_PRESS_EVENT, button as u8, 0, 0)?;
+        self.flush("press pointer button")?;
+        Ok(receipt)
+    }
+
+    pub fn button_up(&self, button: Button) -> Result<ActionReceipt> {
+        let receipt = ActionReceipt::begin(format!("{button:?} up"));
+        self.fake(BUTTON_RELEASE_EVENT, button as u8, 0, 0)?;
+        self.flush("release pointer button")?;
+        Ok(receipt)
+    }
+
+    pub fn scroll(
+        &self,
+        window: &Window,
+        x: i16,
+        y: i16,
+        vertical_ticks: i32,
+    ) -> Result<ActionReceipt> {
+        self.move_to(window, x, y)?;
+        let receipt = ActionReceipt::begin(format!("scroll {vertical_ticks} ticks at ({x}, {y})"));
         let detail = if vertical_ticks < 0 { 4 } else { 5 };
         for _ in 0..vertical_ticks.unsigned_abs() {
             self.fake(BUTTON_PRESS_EVENT, detail, 0, 0)?;
             self.fake(BUTTON_RELEASE_EVENT, detail, 0, 0)?;
         }
-        self.flush("scroll pointer")
+        self.flush("scroll pointer")?;
+        Ok(receipt)
     }
 
-    pub fn key(&self, key: Key) -> Result<()> {
+    pub fn key(&self, key: Key) -> Result<ActionReceipt> {
+        self.chord(Modifiers::empty(), key)
+    }
+
+    pub fn chord(&self, modifiers: Modifiers, key: Key) -> Result<ActionReceipt> {
         let keysym = key.keysym()?;
         let (keycode, shift) = self.keycode(keysym)?;
-        if shift {
-            let (shift_code, _) = self.keycode(Keysym::Shift_L)?;
-            self.fake(KEY_PRESS_EVENT, shift_code, 0, 0)?;
-            self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
-            self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)?;
-            self.fake(KEY_RELEASE_EVENT, shift_code, 0, 0)?;
+        let modifiers = if shift {
+            modifiers | Modifiers::SHIFT
         } else {
+            modifiers
+        };
+        let receipt = ActionReceipt::begin(format!("{modifiers:?}+{key:?}"));
+        let held = self.press_modifiers(modifiers)?;
+        let result = (|| {
             self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
             self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)?;
-        }
-        self.flush("send key")
+            Ok(())
+        })();
+        self.release_keycodes(&held);
+        result?;
+        self.flush("send key")?;
+        Ok(receipt)
     }
 
-    pub fn type_text(&self, text: &str) -> Result<()> {
-        for character in text.chars() {
-            self.key(Key::Character(character))?;
+    pub fn key_down(&self, key: Key) -> Result<ActionReceipt> {
+        let (keycode, shift) = self.keycode(key.keysym()?)?;
+        if shift {
+            return Err(Error::Unsupported {
+                capability: "held shifted key",
+                detail: "hold Shift explicitly and use the unshifted key".to_owned(),
+            });
         }
-        Ok(())
+        let receipt = ActionReceipt::begin(format!("{key:?} down"));
+        self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
+        self.flush("press key")?;
+        Ok(receipt)
+    }
+
+    pub fn key_up(&self, key: Key) -> Result<ActionReceipt> {
+        let (keycode, shift) = self.keycode(key.keysym()?)?;
+        if shift {
+            return Err(Error::Unsupported {
+                capability: "held shifted key",
+                detail: "release the unshifted key and Shift explicitly".to_owned(),
+            });
+        }
+        let receipt = ActionReceipt::begin(format!("{key:?} up"));
+        self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)?;
+        self.flush("release key")?;
+        Ok(receipt)
+    }
+
+    pub fn type_text(&self, text: &str) -> Result<ActionReceipt> {
+        let receipt = ActionReceipt::begin(format!("type {} character(s)", text.chars().count()));
+        for character in text.chars() {
+            let _receipt = self.key(Key::Character(character))?;
+        }
+        Ok(receipt)
+    }
+
+    pub fn drag(
+        &self,
+        window: &Window,
+        from: (i16, i16),
+        to: (i16, i16),
+        policy: Drag,
+    ) -> Result<ActionReceipt> {
+        if policy.steps == 0 {
+            return Err(Error::X11 {
+                operation: "drag pointer",
+                detail: "drag policy requires at least one motion step".to_owned(),
+            });
+        }
+        self.move_to(window, from.0, from.1)?;
+        self.fake(BUTTON_PRESS_EVENT, policy.button as u8, 0, 0)?;
+        self.flush("begin pointer drag")?;
+        if !policy.press_duration.is_zero() {
+            thread::sleep(policy.press_duration);
+        }
+        let pause = policy.duration / u32::from(policy.steps);
+        let mut receipt = None;
+        for step in 1..=policy.steps {
+            if step == policy.steps {
+                receipt = Some(ActionReceipt::begin(format!(
+                    "{:?} drag commit ({}, {}) → ({}, {})",
+                    policy.button, from.0, from.1, to.0, to.1
+                )));
+            }
+            let fraction = f64::from(step) / f64::from(policy.steps);
+            let x = f64::from(from.0)
+                .mul_add(1.0 - fraction, f64::from(to.0) * fraction)
+                .round() as i16;
+            let y = f64::from(from.1)
+                .mul_add(1.0 - fraction, f64::from(to.1) * fraction)
+                .round() as i16;
+            if let Err(err) = self.move_to(window, x, y) {
+                let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
+                let _flushed = self.flush("abort pointer drag");
+                return Err(err);
+            }
+            if step < policy.steps && !pause.is_zero() {
+                thread::sleep(pause);
+            }
+        }
+        if let Err(err) = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0) {
+            let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
+            let _flushed = self.flush("recover pointer drag release");
+            return Err(err);
+        }
+        self.flush("finish pointer drag")?;
+        receipt.ok_or_else(|| Error::X11 {
+            operation: "drag pointer",
+            detail: "drag produced no commit receipt".to_owned(),
+        })
     }
 
     pub fn capture(&self, window: &Window) -> Result<Frame> {
@@ -275,12 +522,24 @@ impl X11Controller {
         ))
     }
 
-    pub fn wait_quiet(&self, window: &Window, policy: Quiet) -> Result<Frame> {
-        wait_quiet(|| self.capture(window), policy)
+    pub fn wait_quiet(
+        &self,
+        app: &Application<'_>,
+        window: &Window,
+        policy: Quiet,
+    ) -> Result<Frame> {
+        wait_quiet(
+            || {
+                app.ensure_running("window pixels to become quiet")?;
+                self.capture(window)
+            },
+            policy,
+        )
     }
 
     pub fn wait_changed(
         &self,
+        app: &Application<'_>,
         window: &Window,
         baseline: &Frame,
         minimum_fraction: f64,
@@ -289,6 +548,7 @@ impl X11Controller {
     ) -> Result<Frame> {
         let deadline = Instant::now() + timeout;
         loop {
+            app.ensure_running("window pixels to change")?;
             let frame = self.capture(window)?;
             if baseline.difference(&frame, channel_slop)? >= minimum_fraction {
                 return Ok(frame);
@@ -395,6 +655,249 @@ impl X11Controller {
     fn flush(&self, operation: &'static str) -> Result<()> {
         self.connection.flush().map_err(|err| x11(operation, err))
     }
+
+    fn press_modifiers(&self, modifiers: Modifiers) -> Result<Vec<u8>> {
+        let mut held = Vec::new();
+        for (flag, symbol) in [
+            (Modifiers::SHIFT, Keysym::Shift_L),
+            (Modifiers::CTRL, Keysym::Control_L),
+            (Modifiers::ALT, Keysym::Alt_L),
+            (Modifiers::SUPER, Keysym::Super_L),
+        ] {
+            if !modifiers.contains(flag) {
+                continue;
+            }
+            let (keycode, _) = match self.keycode(symbol) {
+                Ok(binding) => binding,
+                Err(err) => {
+                    self.release_keycodes(&held);
+                    return Err(err);
+                }
+            };
+            if let Err(err) = self.fake(KEY_PRESS_EVENT, keycode, 0, 0) {
+                self.release_keycodes(&held);
+                return Err(err);
+            }
+            held.push(keycode);
+        }
+        Ok(held)
+    }
+
+    fn release_keycodes(&self, held: &[u8]) {
+        for keycode in held.iter().rev() {
+            let _released = self.fake(KEY_RELEASE_EVENT, *keycode, 0, 0);
+        }
+    }
+}
+
+/// Liveness-coupled application window and action transcript.
+pub struct X11Session<'app, 'bed> {
+    app: &'app Application<'bed>,
+    controller: X11Controller,
+    window: Window,
+    transcript: RefCell<BufWriter<File>>,
+    latest_capture: PathBuf,
+}
+
+impl std::fmt::Debug for X11Session<'_, '_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("X11Session")
+            .field("unit", &self.app.unit())
+            .field("window", &self.window)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'app, 'bed> X11Session<'app, 'bed> {
+    pub(crate) fn forge(
+        testbed: &Testbed,
+        app: &'app Application<'bed>,
+        controller: X11Controller,
+        window: Window,
+    ) -> Result<Self> {
+        let stem = app.unit().replace('.', "_");
+        let transcript_path = testbed.diagnostic_path(format!("{stem}-actions.jsonl"));
+        let transcript = File::create(&transcript_path).map_err(|err| {
+            crate::error::io("create X11 action transcript", &transcript_path, err)
+        })?;
+        Ok(Self {
+            app,
+            controller,
+            window,
+            transcript: RefCell::new(BufWriter::new(transcript)),
+            latest_capture: testbed.host_path(format!("captures/{stem}-latest.png")),
+        })
+    }
+
+    #[must_use]
+    pub const fn window(&self) -> &Window {
+        &self.window
+    }
+
+    #[must_use]
+    pub const fn application(&self) -> &Application<'bed> {
+        self.app
+    }
+
+    pub fn focus(&self) -> Result<()> {
+        self.app.ensure_running("window focus")?;
+        self.controller.focus(&self.window)?;
+        self.note("focus", egui_tester_witness::monotonic_ns())
+    }
+
+    pub fn click(&self, x: i16, y: i16, button: Button) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer click")?;
+        let receipt = self.controller.click(&self.window, x, y, button)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn move_to(&self, x: i16, y: i16) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer motion")?;
+        let receipt = ActionReceipt::begin(format!("pointer motion to ({x}, {y})"));
+        self.controller.move_to(&self.window, x, y)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn modified_click(
+        &self,
+        x: i16,
+        y: i16,
+        button: Button,
+        modifiers: Modifiers,
+    ) -> Result<ActionReceipt> {
+        self.app.ensure_running("modified pointer click")?;
+        let receipt = self
+            .controller
+            .modified_click(&self.window, x, y, button, modifiers)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn chord(&self, modifiers: Modifiers, key: Key) -> Result<ActionReceipt> {
+        self.app.ensure_running("keyboard chord")?;
+        let receipt = self.controller.chord(modifiers, key)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn key(&self, key: Key) -> Result<ActionReceipt> {
+        self.chord(Modifiers::empty(), key)
+    }
+
+    pub fn type_text(&self, text: &str) -> Result<ActionReceipt> {
+        self.app.ensure_running("keyboard text")?;
+        let receipt = self.controller.type_text(text)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn key_down(&self, key: Key) -> Result<ActionReceipt> {
+        self.app.ensure_running("held key press")?;
+        let receipt = self.controller.key_down(key)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn key_up(&self, key: Key) -> Result<ActionReceipt> {
+        self.app.ensure_running("held key release")?;
+        let receipt = self.controller.key_up(key)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn button_down(&self, x: i16, y: i16, button: Button) -> Result<ActionReceipt> {
+        self.app.ensure_running("held pointer press")?;
+        let receipt = self.controller.button_down(&self.window, x, y, button)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn button_up(&self, button: Button) -> Result<ActionReceipt> {
+        self.app.ensure_running("held pointer release")?;
+        let receipt = self.controller.button_up(button)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn drag(&self, from: (i16, i16), to: (i16, i16), policy: Drag) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer drag")?;
+        let receipt = self.controller.drag(&self.window, from, to, policy)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn scroll(&self, x: i16, y: i16, ticks: i32) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer scroll")?;
+        let receipt = self.controller.scroll(&self.window, x, y, ticks)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn capture(&self) -> Result<Frame> {
+        self.app.ensure_running("window capture")?;
+        let frame = self.controller.capture(&self.window)?;
+        self.remember(&frame)?;
+        Ok(frame)
+    }
+
+    /// Wait for the standard post-present witness, then sample product pixels.
+    pub fn wait_presented(&self, probe: &mut JsonProbe, timeout: Duration) -> Result<Frame> {
+        let _presented = probe.wait_presented(self.app, timeout)?;
+        self.capture()
+    }
+
+    pub fn wait_changed(
+        &self,
+        baseline: &Frame,
+        minimum_fraction: f64,
+        channel_slop: u8,
+        timeout: Duration,
+    ) -> Result<Frame> {
+        let frame = self.controller.wait_changed(
+            self.app,
+            &self.window,
+            baseline,
+            minimum_fraction,
+            channel_slop,
+            timeout,
+        )?;
+        self.remember(&frame)?;
+        Ok(frame)
+    }
+
+    pub fn wait_quiet(&self, policy: Quiet) -> Result<Frame> {
+        let frame = self.controller.wait_quiet(self.app, &self.window, policy)?;
+        self.remember(&frame)?;
+        Ok(frame)
+    }
+
+    fn record(&self, receipt: &ActionReceipt) -> Result<()> {
+        self.note(receipt.action(), receipt.started_ns())
+    }
+
+    fn note(&self, action: &str, at_ns: u64) -> Result<()> {
+        let mut transcript = self.transcript.borrow_mut();
+        serde_json::to_writer(
+            &mut *transcript,
+            &serde_json::json!({"at_ns": at_ns, "action": action}),
+        )
+        .map_err(|err| Error::X11 {
+            operation: "write action transcript",
+            detail: err.to_string(),
+        })?;
+        writeln!(transcript)
+            .map_err(|err| crate::error::io("write X11 action transcript", "<transcript>", err))?;
+        transcript
+            .flush()
+            .map_err(|err| crate::error::io("flush X11 action transcript", "<transcript>", err))
+    }
+
+    fn remember(&self, frame: &Frame) -> Result<()> {
+        frame.save_png(&self.latest_capture)
+    }
 }
 
 impl Key {
@@ -422,6 +925,30 @@ impl Key {
             Self::Right => Keysym::Right,
             Self::Up => Keysym::Up,
             Self::Down => Keysym::Down,
+            Self::Function(number) => match number {
+                1 => Keysym::F1,
+                2 => Keysym::F2,
+                3 => Keysym::F3,
+                4 => Keysym::F4,
+                5 => Keysym::F5,
+                6 => Keysym::F6,
+                7 => Keysym::F7,
+                8 => Keysym::F8,
+                9 => Keysym::F9,
+                10 => Keysym::F10,
+                11 => Keysym::F11,
+                12 => Keysym::F12,
+                _ => {
+                    return Err(Error::Unsupported {
+                        capability: "function key",
+                        detail: format!("F{number} is outside the portable F1–F12 set"),
+                    });
+                }
+            },
+            Self::Shift => Keysym::Shift_L,
+            Self::Control => Keysym::Control_L,
+            Self::Alt => Keysym::Alt_L,
+            Self::Super => Keysym::Super_L,
         })
     }
 }

@@ -1,7 +1,9 @@
 use std::{fs, time::Duration};
 
 use eframe as _;
-use egui_tester::{AppCommand, Button, JsonProbe, Quiet, Testbed};
+use egui_tester::{
+    AppCommand, Button, Drag, JsonProbe, Key, Modifiers, Quiet, Testbed, WindowQuery,
+};
 use serde as _;
 use serde_json as _;
 
@@ -21,21 +23,25 @@ fn drives_real_input_and_observes_pixels() {
                 .runtime(Duration::from_secs(30)),
         )
         .expect("launch fixture");
-    let x11 = testbed.x11().expect("connect to private X server");
-    let window = x11
-        .wait_window(&app, "egui tester fixture", Duration::from_secs(15))
+    let session = testbed
+        .x11_session(
+            &app,
+            WindowQuery::title_exact("egui tester fixture"),
+            Duration::from_secs(15),
+        )
         .expect("find fixture window");
-    x11.focus(&window).expect("focus fixture");
+    session.focus().expect("focus fixture");
 
     let mut probe = JsonProbe::new(probe_path);
     let increment = probe
         .wait_anchor(&app, "increment", Duration::from_secs(5))
         .expect("locate increment button");
-    let before = x11
-        .wait_quiet(&window, Quiet::default())
+    let before = session
+        .wait_quiet(Quiet::default())
         .expect("initial pixels settle");
     let (x, y) = increment.center();
-    x11.click(&window, x, y, Button::Primary)
+    let _receipt = session
+        .click(x, y, Button::Primary)
         .expect("click increment");
     let _incremented = probe
         .wait(
@@ -45,8 +51,8 @@ fn drives_real_input_and_observes_pixels() {
             |frame| frame.state["count"] == 1,
         )
         .expect("observe incremented frame");
-    let counted = x11
-        .wait_quiet(&window, Quiet::default())
+    let counted = session
+        .wait_quiet(Quiet::default())
         .expect("incremented pixels settle");
     assert!(
         before
@@ -60,7 +66,8 @@ fn drives_real_input_and_observes_pixels() {
         .wait_anchor(&app, "toggle", Duration::from_secs(3))
         .expect("locate color toggle");
     let (x, y) = toggle.center();
-    x11.click(&window, x, y, Button::Primary)
+    let _receipt = session
+        .click(x, y, Button::Primary)
         .expect("click color toggle");
     let _violet = probe
         .wait(
@@ -70,8 +77,8 @@ fn drives_real_input_and_observes_pixels() {
             |frame| frame.state["violet"] == true,
         )
         .expect("observe violet frame");
-    let violet = x11
-        .wait_quiet(&window, Quiet::default())
+    let violet = session
+        .wait_quiet(Quiet::default())
         .expect("violet pixels settle");
     assert!(
         counted
@@ -85,7 +92,8 @@ fn drives_real_input_and_observes_pixels() {
         .wait_anchor(&app, "text", Duration::from_secs(3))
         .expect("locate text field");
     let (x, y) = text.center();
-    x11.click(&window, x, y, Button::Primary)
+    let _receipt = session
+        .click(x, y, Button::Primary)
         .expect("focus text field");
     let _focused = probe
         .wait(
@@ -95,7 +103,7 @@ fn drives_real_input_and_observes_pixels() {
             |frame| frame.state["text_focused"] == true,
         )
         .expect("observe text focus");
-    x11.type_text("blade").expect("inject keyboard text");
+    let _typed_text = session.type_text("blade").expect("inject keyboard text");
     let _typed = probe
         .wait(
             &app,
@@ -104,6 +112,61 @@ fn drives_real_input_and_observes_pixels() {
             |frame| frame.state["text"] == "blade",
         )
         .expect("observe keyboard input");
+    let _select = session
+        .chord(Modifiers::CTRL, Key::Character('a'))
+        .expect("select all text");
+    let _replacement_text = session.type_text("steel").expect("replace keyboard text");
+    let _replaced = probe
+        .wait(
+            &app,
+            Duration::from_secs(3),
+            "text field replacement",
+            |frame| frame.state["text"] == "steel",
+        )
+        .expect("observe modified keyboard input");
+
+    let _f2 = session.key(Key::Function(2)).expect("inject F2");
+    let _function_key = probe
+        .wait(
+            &app,
+            Duration::from_secs(3),
+            "F2 count to become one",
+            |frame| frame.state["f2_count"] == 1,
+        )
+        .expect("observe function key");
+
+    let drag = probe
+        .wait_anchor(&app, "drag", Duration::from_secs(3))
+        .expect("locate draggable slider");
+    let [x0, y0, x1, y1] = drag.rect;
+    let _dragged = session
+        .drag(
+            (
+                (x0 + 8.0).round() as i16,
+                f32::midpoint(y0, y1).round() as i16,
+            ),
+            (
+                (x1 - 8.0).round() as i16,
+                f32::midpoint(y0, y1).round() as i16,
+            ),
+            Drag {
+                duration: Duration::from_millis(40),
+                ..Drag::default()
+            },
+        )
+        .expect("drag real slider");
+    let _drag_value = probe
+        .wait(
+            &app,
+            Duration::from_secs(3),
+            "dragged slider to reach its upper range",
+            |frame| {
+                frame.state["drag_value"]
+                    .as_f64()
+                    .is_some_and(|value| value > 80.0)
+            },
+        )
+        .expect("observe pointer drag");
     app.terminate().expect("terminate fixture cgroup");
     drop(app);
     drop(testbed);
@@ -174,4 +237,31 @@ fn undeclared_host_data_is_invisible() {
         exit.stderr
     );
     app.terminate().expect("collect denied reader cgroup");
+}
+
+#[test]
+fn result_failures_retain_registered_artifacts() {
+    let sink = tempfile::tempdir().expect("create artifact sink");
+    let verdict = Testbed::builder()
+        .failure_artifacts(sink.path())
+        .run(|testbed| {
+            let _oracle = testbed.write_private("project/oracle.txt", b"retained")?;
+            testbed.retain_on_failure("project/oracle.txt")?;
+            Err::<(), _>(egui_tester::Error::Containment {
+                layer: "fixture verdict",
+                detail: "deliberate failure".to_owned(),
+            })
+        });
+    assert!(verdict.is_err(), "deliberate scenario unexpectedly passed");
+    let sessions = fs::read_dir(sink.path())
+        .expect("read artifact sink")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read artifact entries");
+    let [session] = sessions.as_slice() else {
+        panic!("expected one retained session, found {}", sessions.len());
+    };
+    assert_eq!(
+        fs::read(session.path().join("project/oracle.txt")).expect("read retained oracle"),
+        b"retained"
+    );
 }

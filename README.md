@@ -12,11 +12,15 @@ The name is intentionally utilitarian.
 The X11 backend is the complete MVP:
 
 - private authenticated Xvfb, never the caller's `DISPLAY`
-- XTEST pointer, button, wheel, and Latin-1 keyboard input from Rust
+- XTEST pointer, held-button, drag, wheel, modifier, function-key, and Latin-1
+  keyboard input from Rust
 - window discovery, focus, RGBA capture, PNG artifacts
 - bounded waits for windows, witness predicates, external effects, pixel
   change, and pixel quiescence
-- atomic JSON witness compatibility for booru's present `devtools` probe
+- versioned, launch-sealed, post-present witnesses through
+  `egui-tester-witness`
+- input-to-observation and input-to-presentation performance budgets
+- action transcripts, last-good captures, and automatic failure bundles
 
 The Wayland backend owns a headless Weston compositor and captures its virtual
 output through `weston-screenshooter`. Launch-and-pixel smoke tests therefore
@@ -48,9 +52,9 @@ representative performance runs; it still grants no writable host files.
 
 ## Model
 
-A **witness** answers “where is the control?” or “has a newer frame been
-built?” A witness may be an AccessKit tree, booru's JSON probe, or a startup
-marker.
+A **witness** answers “where is the control?” or “has a newer product frame
+been presented?” The standard witness is one-way, atomic, launch-sealed
+telemetry. Legacy application probes remain readable during migration.
 
 An **oracle** answers “did the product work?” Oracles are captured pixels,
 files the product emitted into private state, process exits, or externally
@@ -62,31 +66,52 @@ the interaction:
 
 - `JsonProbe::wait` and `wait_fresh`
 - `Application::wait_until` for external predicates
-- `X11Controller::wait_changed`
-- `X11Controller::wait_quiet` with explicit tolerance and consecutive samples
+- `X11Session::wait_changed`
+- `X11Session::wait_quiet` with explicit tolerance and consecutive samples
 
 Animated products should wait for a semantic or external predicate and then
 sample pixels; they should not demand quiescence from an animation.
+
+`PerformanceBudget` keeps the production threshold separate from its larger
+functional timeout. `JsonProbe::wait_budgeted` measures a native-input
+`ActionReceipt` against an in-product monotonic timestamp. Observation budgets
+end after product-state work and before witness work. Calling
+`through_presentation()` instead ends after the corresponding real frame was
+presented. Polling, screenshots, anchor extraction, serialization, and witness
+I/O cannot consume either budget.
 
 ## Example
 
 ```rust,no_run
 use std::time::Duration;
-use egui_tester::{AppCommand, Button, JsonProbe, Testbed};
+use egui_tester::{
+    AppCommand, Button, PerformanceBudget, Testbed, WindowQuery,
+};
 
 let testbed = Testbed::raise()?;
-let probe_path = testbed.private_path("probes/app.json")?;
 let app = testbed.launch(
     AppCommand::new("/path/to/app")
-        .private_env("MY_TEST_PROBE", "probes/app.json")
+        .witness("probes/app.json")
         .runtime(Duration::from_secs(30)),
 )?;
-let x11 = testbed.x11()?;
-let window = x11.wait_window(&app, "window title", Duration::from_secs(10))?;
-let mut probe = JsonProbe::new(probe_path);
+let session = testbed.x11_session(
+    &app,
+    WindowQuery::title_exact("window title"),
+    Duration::from_secs(10),
+)?;
+let mut probe = app.witness()?;
+session.wait_presented(&mut probe, Duration::from_secs(10))?;
 let target = probe.wait_anchor(&app, "submit", Duration::from_secs(5))?;
 let (x, y) = target.center();
-x11.click(&window, x, y, Button::Primary)?;
+let click = session.click(x, y, Button::Primary)?;
+let _submitted = probe.wait_budgeted(
+    &app,
+    &click,
+    PerformanceBudget::new(Duration::from_millis(250))
+        .through_presentation(),
+    "submit the form",
+    |frame| frame.state["submitted"] == true,
+)?;
 # Ok::<(), egui_tester::Error>(())
 ```
 
@@ -100,6 +125,10 @@ cargo test -p egui-tester-fixture --test e2e
 The fixture suite proves real input and pixels, teardown of private state,
 default host invisibility, and denial of writes through an explicit read-only
 borrow.
+
+`cargo run -p egui-tester-doctor` is the turnkey host preflight. It discovers
+the canonical user manager without borrowing the caller's desktop session and
+raises then destroys one isolated universe.
 
 The out-of-tree booru acceptance scenario uses its checked-in demo state:
 
@@ -118,11 +147,22 @@ It opens the UI recess, changes water mode, adjudicates real pixel changes,
 waits for the private slate without a scripted sleep, restarts booru, and
 proves persistence.
 
+Trailgen is the first standard-witness adoption:
+
+```console
+cd ../adequate_trailgen
+scripts/test-gui
+```
+
+Its release-mode acceptance creates a project through the real CLI, opens and
+renames a saved trail, acquires and drags a map pin, proves live route
+recomputation, persists it, and checks the library as an external oracle.
+
 Wayland validation is optional until Weston is installed:
 
 ```console
 cargo test -p egui-tester-fixture --test wayland -- --ignored
 ```
 
-See [architecture.md](docs/architecture.md) for boundaries and the next
-increments.
+See [architecture.md](docs/architecture.md) for boundaries and
+[adoption.md](docs/adoption.md) for the reusable application contract.
