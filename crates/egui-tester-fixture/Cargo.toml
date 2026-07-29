@@ -1,0 +1,24 @@
+[package]
+name = "egui-tester-fixture"
+description = "Black-box GUI and containment fixture for egui-tester"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+eframe = { version = "0.34.1", default-features = false, features = [
+  "accesskit",
+  "wayland",
+  "wgpu",
+  "x11",
+] }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+egui-tester = { path = "../egui-tester" }
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,756 @@
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    path::{Component, Path, PathBuf},
+    process::{Command, Output},
+    thread,
+    time::{Duration, Instant},
+};
+
+use crate::{
+    Error, Result,
+    error::io,
+    testbed::{DisplaySeal, Testbed},
+};
+
+const GUEST_ROOT: &str = "/test";
+
+/// Application network authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Network {
+    /// A private network namespace with no interfaces.
+    #[default]
+    Deny,
+    /// Share the host network namespace.
+    Host,
+}
+
+/// Graphics device authority.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Graphics {
+    /// A pinned, read-only lavapipe runtime with a synthetic `/dev`.
+    #[default]
+    Software,
+    /// Host GPU devices plus read-only sysfs, for representative performance.
+    Host,
+}
+
+/// A black-box application launch specification.
+#[derive(Clone, Debug)]
+pub struct AppCommand {
+    binary: PathBuf,
+    args: Vec<OsString>,
+    env: BTreeMap<OsString, OsString>,
+    borrows: Vec<PathBuf>,
+    violations: Vec<String>,
+    network: Network,
+    graphics: Graphics,
+    runtime: Duration,
+}
+
+impl AppCommand {
+    #[must_use]
+    pub fn new(binary: impl Into<PathBuf>) -> Self {
+        Self {
+            binary: binary.into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            borrows: Vec::new(),
+            violations: Vec::new(),
+            network: Network::Deny,
+            graphics: Graphics::Software,
+            runtime: Duration::from_mins(2),
+        }
+    }
+
+    #[must_use]
+    pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    #[must_use]
+    pub fn args(mut self, args: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Set a non-reserved environment variable.
+    #[must_use]
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        let _previous = self.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set an environment variable to a path inside the disposable test root.
+    #[must_use]
+    pub fn private_env(mut self, key: impl Into<OsString>, relative: impl AsRef<Path>) -> Self {
+        let relative = relative.as_ref();
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            self.violations.push(format!(
+                "private environment path `{}` is not confined",
+                relative.display()
+            ));
+        }
+        let path = Path::new(GUEST_ROOT).join(relative);
+        let _previous = self.env.insert(key.into(), path.into_os_string());
+        self
+    }
+
+    /// Reveal one live host path read-only at the same absolute path.
+    ///
+    /// There is intentionally no writable counterpart.
+    #[must_use]
+    pub fn borrow_read_only(mut self, path: impl Into<PathBuf>) -> Self {
+        self.borrows.push(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn network(mut self, network: Network) -> Self {
+        self.network = network;
+        self
+    }
+
+    #[must_use]
+    pub fn graphics(mut self, graphics: Graphics) -> Self {
+        self.graphics = graphics;
+        self
+    }
+
+    #[must_use]
+    pub fn runtime(mut self, runtime: Duration) -> Self {
+        self.runtime = runtime;
+        self
+    }
+}
+
+/// Exit facts retained by the transient service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Exit {
+    pub code: i32,
+    pub result: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Exit {
+    #[must_use]
+    pub fn success(&self) -> bool {
+        self.code == 0 && self.result == "success"
+    }
+}
+
+/// One application cgroup.
+pub struct Application<'a> {
+    unit: String,
+    stdout: PathBuf,
+    stderr: PathBuf,
+    stopped: Cell<bool>,
+    _testbed: &'a Testbed,
+}
+
+impl std::fmt::Debug for Application<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Application")
+            .field("unit", &self.unit)
+            .field("stdout", &self.stdout)
+            .field("stderr", &self.stderr)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> Application<'a> {
+    pub(crate) fn raise(testbed: &'a Testbed, command: AppCommand, ordinal: u64) -> Result<Self> {
+        validate_command(&command)?;
+        let binary = command
+            .binary
+            .canonicalize()
+            .map_err(|err| io("resolve application binary", &command.binary, err))?;
+        if !binary.is_file() {
+            return Err(Error::Containment {
+                layer: "launcher",
+                detail: format!("application binary `{}` is not a file", binary.display()),
+            });
+        }
+        let borrows = command
+            .borrows
+            .iter()
+            .map(|path| {
+                path.canonicalize()
+                    .map(|source| ReadOnlyMount {
+                        source,
+                        guest: path.clone(),
+                    })
+                    .map_err(|err| io("resolve read-only borrow", path, err))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let unit = format!("egui-tester-{}-{ordinal}", testbed.id());
+        let stdout = testbed.host_path(format!("logs/app-{ordinal}.stdout"));
+        let stderr = testbed.host_path(format!("logs/app-{ordinal}.stderr"));
+        create_empty(&stdout)?;
+        create_empty(&stderr)?;
+
+        let bwrap = bwrap_argv(testbed, &command, &binary, &borrows)?;
+        let mut systemd = Command::new("systemd-run");
+        let _command = systemd
+            .args([
+                "--user",
+                "--quiet",
+                "--remain-after-exit",
+                "--service-type=exec",
+                "--unit",
+                &unit,
+                "--property=KillMode=control-group",
+                "--property=SendSIGKILL=yes",
+                "--property=TimeoutStopSec=2s",
+                "--property=ProtectSystem=strict",
+                "--property=ProtectHome=read-only",
+                "--property=NoNewPrivileges=yes",
+                "--property=RestrictSUIDSGID=yes",
+                "--property=LockPersonality=yes",
+                "--property=RestrictRealtime=yes",
+                "--property=ProtectKernelModules=yes",
+                "--property=ProtectControlGroups=yes",
+                "--property=ProtectClock=yes",
+                "--property=SystemCallArchitectures=native",
+                "--property=UMask=0077",
+            ])
+            .arg(format!(
+                "--property=RuntimeMaxSec={}s",
+                command.runtime.as_secs()
+            ))
+            .arg(format!(
+                "--property=ReadWritePaths={}",
+                testbed.root().display()
+            ))
+            .arg(format!(
+                "--property=StandardOutput=append:{}",
+                stdout.display()
+            ))
+            .arg(format!(
+                "--property=StandardError=append:{}",
+                stderr.display()
+            ));
+        if command.network == Network::Deny {
+            let _command = systemd.args([
+                "--property=PrivateNetwork=yes",
+                "--property=IPAddressDeny=any",
+            ]);
+        }
+        let _command = systemd.arg("--").args(bwrap);
+        let output = systemd
+            .output()
+            .map_err(|err| io("spawn transient application service", "systemd-run", err))?;
+        if !output.status.success() {
+            return Err(Error::Containment {
+                layer: "systemd",
+                detail: command_failure(&systemd, &output),
+            });
+        }
+        let app = Self {
+            unit,
+            stdout,
+            stderr,
+            stopped: Cell::new(false),
+            _testbed: testbed,
+        };
+        Ok(app)
+    }
+
+    #[must_use]
+    pub fn unit(&self) -> &str {
+        &self.unit
+    }
+
+    #[must_use]
+    pub fn stdout_path(&self) -> &Path {
+        &self.stdout
+    }
+
+    #[must_use]
+    pub fn stderr_path(&self) -> &Path {
+        &self.stderr
+    }
+
+    pub fn ensure_running(&self, waiting: impl Into<String>) -> Result<()> {
+        let waiting = waiting.into();
+        let status = self.status()?;
+        if status.sub_state == "running" {
+            return Ok(());
+        }
+        Err(Error::ApplicationExited {
+            unit: self.unit.clone(),
+            waiting,
+            detail: format!(
+                "active={}, sub={}, result={}, code={}; stderr: {}",
+                status.active_state,
+                status.sub_state,
+                status.result,
+                status.code,
+                tail(&self.stderr, 4096)
+            ),
+        })
+    }
+
+    pub fn wait(&self, timeout: Duration) -> Result<Exit> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let status = self.status()?;
+            if status.sub_state != "running" && status.sub_state != "start" {
+                return Ok(Exit {
+                    code: status.code,
+                    result: status.result,
+                    stdout: read_lossy(&self.stdout),
+                    stderr: read_lossy(&self.stderr),
+                });
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout {
+                    waiting: format!("application unit `{}` to exit", self.unit),
+                    timeout,
+                });
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Poll an external product predicate while continuously proving the app
+    /// has not exited.
+    pub fn wait_until(
+        &self,
+        timeout: Duration,
+        description: impl Into<String>,
+        mut predicate: impl FnMut() -> Result<bool>,
+    ) -> Result<()> {
+        let description = description.into();
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.ensure_running(&description)?;
+            if predicate()? {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout {
+                    waiting: description,
+                    timeout,
+                });
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    pub fn terminate(&self) -> Result<()> {
+        if self.stopped.replace(true) {
+            return Ok(());
+        }
+        let output = Command::new("systemctl")
+            .args(["--user", "stop", &self.unit])
+            .output()
+            .map_err(|err| io("stop application service", "systemctl", err))?;
+        if !output.status.success() {
+            return Err(Error::Containment {
+                layer: "systemd",
+                detail: format!(
+                    "could not stop `{}`: {}",
+                    self.unit,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        reset_unit(&self.unit);
+        Ok(())
+    }
+
+    fn status(&self) -> Result<UnitStatus> {
+        let output = Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                &self.unit,
+                "--property=ActiveState",
+                "--property=SubState",
+                "--property=Result",
+                "--property=ExecMainStatus",
+            ])
+            .output()
+            .map_err(|err| io("query application service", "systemctl", err))?;
+        if !output.status.success() {
+            return Err(Error::Containment {
+                layer: "systemd",
+                detail: format!(
+                    "could not query `{}`: {}",
+                    self.unit,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        UnitStatus::parse(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+impl Drop for Application<'_> {
+    fn drop(&mut self) {
+        if !self.stopped.get() {
+            let _ignored = Command::new("systemctl")
+                .args(["--user", "stop", &self.unit])
+                .status();
+            reset_unit(&self.unit);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UnitStatus {
+    active_state: String,
+    sub_state: String,
+    result: String,
+    code: i32,
+}
+
+impl UnitStatus {
+    fn parse(text: &str) -> Result<Self> {
+        let fields = text
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect::<BTreeMap<_, _>>();
+        let get = |name| {
+            fields.get(name).copied().ok_or_else(|| Error::Containment {
+                layer: "systemd",
+                detail: format!("unit status omitted `{name}`"),
+            })
+        };
+        Ok(Self {
+            active_state: get("ActiveState")?.to_owned(),
+            sub_state: get("SubState")?.to_owned(),
+            result: get("Result")?.to_owned(),
+            code: get("ExecMainStatus")?
+                .parse()
+                .map_err(|err| Error::Containment {
+                    layer: "systemd",
+                    detail: format!("invalid ExecMainStatus: {err}"),
+                })?,
+        })
+    }
+}
+
+fn bwrap_argv(
+    testbed: &Testbed,
+    command: &AppCommand,
+    binary: &Path,
+    borrows: &[ReadOnlyMount],
+) -> Result<Vec<OsString>> {
+    let mut args = [
+        "/usr/bin/bwrap",
+        "--die-with-parent",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
+        "--clearenv",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind",
+        "/etc",
+        "/etc",
+        "--symlink",
+        "usr/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+        "--symlink",
+        "usr/lib",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/run",
+        "--dir",
+        "/tmp",
+        "--bind",
+    ]
+    .map(OsString::from)
+    .to_vec();
+    args.extend([
+        testbed.root().as_os_str().to_owned(),
+        OsString::from(GUEST_ROOT),
+        OsString::from("--dir"),
+        OsString::from("/app"),
+        OsString::from("--ro-bind"),
+        binary.as_os_str().to_owned(),
+        OsString::from("/app/application"),
+    ]);
+    match command.graphics {
+        Graphics::Software => {
+            let lavapipe = lavapipe_root()?;
+            args.extend([
+                OsString::from("--dev"),
+                OsString::from("/dev"),
+                OsString::from("--dir"),
+                OsString::from("/opt"),
+                OsString::from("--dir"),
+                OsString::from("/opt/egui-tester"),
+                OsString::from("--ro-bind"),
+                lavapipe.into_os_string(),
+                OsString::from("/opt/egui-tester/lavapipe"),
+            ]);
+        }
+        Graphics::Host => {
+            args.extend([
+                OsString::from("--dev-bind"),
+                OsString::from("/dev"),
+                OsString::from("/dev"),
+                OsString::from("--ro-bind"),
+                OsString::from("/sys"),
+                OsString::from("/sys"),
+            ]);
+        }
+    }
+    if command.network == Network::Deny {
+        args.push(OsString::from("--unshare-net"));
+    }
+    testbed.display_seal().append_bwrap(&mut args);
+    for borrow in borrows {
+        append_parent_dirs(&mut args, &borrow.guest)?;
+        args.extend([
+            OsString::from("--ro-bind"),
+            borrow.source.as_os_str().to_owned(),
+            borrow.guest.as_os_str().to_owned(),
+        ]);
+    }
+    let environment = sealed_environment(testbed, command);
+    for (key, value) in environment {
+        args.extend([OsString::from("--setenv"), key, value]);
+    }
+    args.extend([
+        OsString::from("--chdir"),
+        OsString::from("/test/home"),
+        OsString::from("--"),
+        OsString::from("/app/application"),
+    ]);
+    args.extend(command.args.iter().cloned());
+    Ok(args)
+}
+
+fn sealed_environment(testbed: &Testbed, command: &AppCommand) -> BTreeMap<OsString, OsString> {
+    let mut env = BTreeMap::from([
+        (OsString::from("PATH"), OsString::from("/usr/bin")),
+        (OsString::from("HOME"), OsString::from("/test/home")),
+        (
+            OsString::from("XDG_CONFIG_HOME"),
+            OsString::from("/test/xdg/config"),
+        ),
+        (
+            OsString::from("XDG_CACHE_HOME"),
+            OsString::from("/test/xdg/cache"),
+        ),
+        (
+            OsString::from("XDG_DATA_HOME"),
+            OsString::from("/test/xdg/data"),
+        ),
+        (
+            OsString::from("XDG_STATE_HOME"),
+            OsString::from("/test/xdg/state"),
+        ),
+        (
+            OsString::from("XDG_RUNTIME_DIR"),
+            OsString::from("/test/xdg/runtime"),
+        ),
+        (OsString::from("TMPDIR"), OsString::from("/test/tmp")),
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
+        (OsString::from("TZ"), OsString::from("UTC")),
+        (OsString::from("RUST_BACKTRACE"), OsString::from("1")),
+    ]);
+    testbed.display_seal().append_environment(&mut env);
+    if command.graphics == Graphics::Software {
+        env.extend([
+            (
+                OsString::from("LD_LIBRARY_PATH"),
+                OsString::from("/opt/egui-tester/lavapipe/usr/lib"),
+            ),
+            (
+                OsString::from("VK_ICD_FILENAMES"),
+                OsString::from("/opt/egui-tester/lavapipe/usr/share/vulkan/icd.d/lvp_icd.json"),
+            ),
+            (OsString::from("LIBGL_ALWAYS_SOFTWARE"), OsString::from("1")),
+        ]);
+    }
+    env.extend(command.env.clone());
+    env
+}
+
+fn lavapipe_root() -> Result<PathBuf> {
+    let configured = std::env::var_os("EGUI_TESTER_LAVAPIPE").map(PathBuf::from);
+    let conventional = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/share/x11-gui-testing/lavapipe"));
+    configured
+        .into_iter()
+        .chain(conventional)
+        .find(|root| {
+            root.join("usr/lib/libvulkan_lvp.so").is_file()
+                && root
+                    .join("usr/share/vulkan/icd.d/lvp_icd.json")
+                    .is_file()
+        })
+        .ok_or_else(|| Error::Unsupported {
+            capability: "software graphics",
+            detail: "lavapipe was not found; set EGUI_TESTER_LAVAPIPE or install the x11-gui-testing lavapipe runtime".to_owned(),
+        })
+}
+
+fn validate_command(command: &AppCommand) -> Result<()> {
+    const RESERVED: [&str; 12] = [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "HOME",
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "DBUS_SYSTEM_BUS_ADDRESS",
+    ];
+    if let Some(detail) = command.violations.first() {
+        return Err(Error::Containment {
+            layer: "private environment",
+            detail: detail.clone(),
+        });
+    }
+    for key in command.env.keys() {
+        if RESERVED.iter().any(|reserved| key == OsStr::new(reserved)) {
+            return Err(Error::Containment {
+                layer: "environment seal",
+                detail: format!(
+                    "reserved environment variable `{}` cannot be overridden",
+                    key.to_string_lossy()
+                ),
+            });
+        }
+    }
+    for borrow in &command.borrows {
+        if !borrow.is_absolute()
+            || borrow
+                .components()
+                .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        {
+            return Err(Error::Containment {
+                layer: "mount namespace",
+                detail: format!(
+                    "read-only borrow `{}` is not a normalized absolute path",
+                    borrow.display()
+                ),
+            });
+        }
+        for forbidden in ["/app", "/dev", "/proc", "/run", "/sys", "/test"] {
+            if borrow.starts_with(forbidden) {
+                return Err(Error::Containment {
+                    layer: "mount namespace",
+                    detail: format!(
+                        "read-only borrow `{}` overlaps reserved guest root `{forbidden}`",
+                        borrow.display()
+                    ),
+                });
+            }
+        }
+        if borrow.starts_with("/tmp/.X11-unix") {
+            return Err(Error::Containment {
+                layer: "mount namespace",
+                detail: "X11 sockets are owned exclusively by the display seal".to_owned(),
+            });
+        }
+    }
+    if command.runtime.is_zero() {
+        return Err(Error::Containment {
+            layer: "systemd",
+            detail: "application runtime must be nonzero".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+struct ReadOnlyMount {
+    source: PathBuf,
+    guest: PathBuf,
+}
+
+fn append_parent_dirs(args: &mut Vec<OsString>, path: &Path) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| Error::Containment {
+        layer: "mount namespace",
+        detail: format!("borrow `{}` has no parent", path.display()),
+    })?;
+    let mut built = PathBuf::from("/");
+    for component in parent.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => {
+                built.push(part);
+                args.extend([OsString::from("--dir"), built.as_os_str().to_owned()]);
+            }
+            _ => {
+                return Err(Error::Containment {
+                    layer: "mount namespace",
+                    detail: format!(
+                        "borrow `{}` contains a non-normal component",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_empty(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| io("create log directory", parent, err))?;
+    }
+    std::fs::File::create(path)
+        .map(|_| ())
+        .map_err(|err| io("create service log", path, err))
+}
+
+fn command_failure(command: &Command, output: &Output) -> String {
+    format!(
+        "`{:?}` returned {}; stdout: {}; stderr: {}",
+        command,
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn read_lossy(path: &Path) -> String {
+    std::fs::read(path)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|err| format!("<could not read {}: {err}>", path.display()))
+}
+
+fn tail(path: &Path, limit: usize) -> String {
+    let text = read_lossy(path);
+    let start = text.floor_char_boundary(text.len().saturating_sub(limit));
+    text[start..].trim().to_owned()
+}
+
+fn reset_unit(unit: &str) {
+    let _ignored = Command::new("systemctl")
+        .args(["--user", "reset-failed", unit])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
