@@ -7,13 +7,13 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    fs::File,
-    io::Write as _,
+    fs::{File, OpenOptions},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
 };
 
 use rustix::time::{ClockId, clock_gettime};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub const SCHEMA: u32 = 2;
 pub const PATH_ENV: &str = "EGUI_TESTER_WITNESS";
@@ -23,6 +23,9 @@ pub const FRAMES_ENV: &str = "EGUI_TESTER_FRAMES";
 const FRAME_MAGIC: &[u8; 8] = b"EGUIFRM\0";
 const FRAME_SCHEMA: u32 = 1;
 const FRAME_RECORD_BYTES: usize = 6 * size_of::<u64>();
+const OBSERVATION_MAGIC: &[u8; 8] = b"EGUIOBS\0";
+const OBSERVATION_SCHEMA: u32 = 1;
+const MAX_OBSERVATION_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -41,6 +44,8 @@ pub enum Error {
     },
     #[error("invalid frame journal `{path}`: {detail}")]
     FrameJournal { path: PathBuf, detail: String },
+    #[error("invalid observation journal `{path}`: {detail}")]
+    ObservationJournal { path: PathBuf, detail: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -179,6 +184,8 @@ pub struct Publisher {
     path: PathBuf,
     frame_path: PathBuf,
     frames: File,
+    observation_path: PathBuf,
+    observations: File,
     launch: String,
     presentation: u64,
 }
@@ -198,12 +205,17 @@ impl Publisher {
                 if launch.is_empty() {
                     return Err(Error::Environment("EGUI_TESTER_LAUNCH is empty"));
                 }
+                let path = PathBuf::from(path);
                 let frame_path = PathBuf::from(frame_path);
                 let frames = open_frame_journal(&frame_path, &launch)?;
+                let observation_path = observation_path(&path);
+                let observations = open_observation_journal(&observation_path, &launch)?;
                 Ok(Some(Self {
-                    path: PathBuf::from(path),
+                    path,
                     frame_path,
                     frames,
+                    observation_path,
+                    observations,
                     launch,
                     presentation: 0,
                 }))
@@ -254,6 +266,7 @@ impl Publisher {
             state: &pending.state,
         };
         let bytes = serde_json::to_vec(&frame)?;
+        append_observation(&mut self.observations, &self.observation_path, &bytes)?;
         write_atomic(&self.path, &bytes)?;
         let retired = ProductInstant::now();
         let sample = FrameSample {
@@ -282,6 +295,11 @@ impl Publisher {
     pub fn frame_path(&self) -> &Path {
         &self.frame_path
     }
+
+    #[must_use]
+    pub fn observation_path(&self) -> &Path {
+        &self.observation_path
+    }
 }
 
 #[derive(Serialize)]
@@ -296,6 +314,62 @@ struct WireFrame<'a, T> {
     ppp: f32,
     anchors: &'a [Anchor],
     state: &'a T,
+}
+
+/// Incremental reader for every presented semantic observation.
+///
+/// The atomic witness remains the current-state and hit-testing surface. This
+/// journal is the lossless causal surface used to ensure a brief valid state
+/// cannot disappear between harness polls.
+#[derive(Debug)]
+pub struct ObservationJournal {
+    path: PathBuf,
+    launch: String,
+    input: Option<File>,
+}
+
+impl ObservationJournal {
+    #[must_use]
+    pub fn sealed(snapshot_path: &Path, launch: impl Into<String>) -> Self {
+        Self {
+            path: observation_path(snapshot_path),
+            launch: launch.into(),
+            input: None,
+        }
+    }
+
+    pub fn read_new<T: DeserializeOwned>(&mut self) -> Result<Vec<T>> {
+        if self.input.is_none() {
+            self.input = Some(open_observation_reader(&self.path, &self.launch)?);
+        }
+        let input = self
+            .input
+            .as_mut()
+            .ok_or_else(|| Error::ObservationJournal {
+                path: self.path.clone(),
+                detail: "reader did not open".to_owned(),
+            })?;
+        let mut observations = Vec::new();
+        while let Some(bytes) = read_observation(input, &self.path)? {
+            observations.push(serde_json::from_slice(&bytes).map_err(|error| {
+                Error::ObservationJournal {
+                    path: self.path.clone(),
+                    detail: format!("decode record: {error}"),
+                }
+            })?);
+        }
+        Ok(observations)
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[must_use]
+pub fn observation_path(snapshot_path: &Path) -> PathBuf {
+    snapshot_path.with_extension("observations")
 }
 
 /// An unforgeable timestamp in the harness's shared monotonic epoch.
@@ -480,6 +554,177 @@ fn open_frame_journal(path: &Path, launch: &str) -> Result<File> {
         source,
     })?;
     Ok(output)
+}
+
+fn open_observation_journal(path: &Path, launch: &str) -> Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| Error::Io {
+            operation: "create parent for",
+            path: parent.to_owned(),
+            source,
+        })?;
+    }
+    let mut output = File::create(path).map_err(|source| Error::Io {
+        operation: "create",
+        path: path.to_owned(),
+        source,
+    })?;
+    write_observation_header(&mut output, path, launch)?;
+    Ok(output)
+}
+
+fn open_observation_reader(path: &Path, expected_launch: &str) -> Result<File> {
+    let mut input = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|source| Error::Io {
+            operation: "open",
+            path: path.to_owned(),
+            source,
+        })?;
+    let mut magic = [0_u8; OBSERVATION_MAGIC.len()];
+    read_journal_header(&mut input, path, &mut magic)?;
+    if &magic != OBSERVATION_MAGIC {
+        return invalid_observation_journal(path, "magic mismatch");
+    }
+    let schema = read_observation_u32(&mut input, path, "schema")?;
+    if schema != OBSERVATION_SCHEMA {
+        return invalid_observation_journal(
+            path,
+            format!("expected schema {OBSERVATION_SCHEMA}, found {schema}"),
+        );
+    }
+    let launch_bytes = read_observation_u32(&mut input, path, "launch length")? as usize;
+    let mut launch = vec![0_u8; launch_bytes];
+    read_journal_header(&mut input, path, &mut launch)?;
+    let launch = std::str::from_utf8(&launch).map_err(|error| Error::ObservationJournal {
+        path: path.to_owned(),
+        detail: format!("launch seal is not UTF-8: {error}"),
+    })?;
+    if launch != expected_launch {
+        return invalid_observation_journal(
+            path,
+            format!("launch nonce mismatch: expected `{expected_launch}`, found `{launch}`"),
+        );
+    }
+    Ok(input)
+}
+
+fn write_observation_header(output: &mut File, path: &Path, launch: &str) -> Result<()> {
+    let launch_bytes = launch.as_bytes();
+    let launch_len =
+        u32::try_from(launch_bytes.len()).map_err(|error| Error::ObservationJournal {
+            path: path.to_owned(),
+            detail: format!("launch seal is too long: {error}"),
+        })?;
+    let mut header = Vec::with_capacity(16 + launch_bytes.len());
+    header.extend(OBSERVATION_MAGIC);
+    header.extend(OBSERVATION_SCHEMA.to_le_bytes());
+    header.extend(launch_len.to_le_bytes());
+    header.extend(launch_bytes);
+    output.write_all(&header).map_err(|source| Error::Io {
+        operation: "write header to",
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn append_observation(output: &mut File, path: &Path, bytes: &[u8]) -> Result<()> {
+    let length = u32::try_from(bytes.len()).map_err(|error| Error::ObservationJournal {
+        path: path.to_owned(),
+        detail: format!("record is too large: {error}"),
+    })?;
+    output
+        .write_all(&length.to_le_bytes())
+        .and_then(|()| output.write_all(bytes))
+        .map_err(|source| Error::Io {
+            operation: "append to",
+            path: path.to_owned(),
+            source,
+        })
+}
+
+fn read_observation(input: &mut File, path: &Path) -> Result<Option<Vec<u8>>> {
+    let start = input.stream_position().map_err(|source| Error::Io {
+        operation: "read position from",
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut encoded_length = [0_u8; size_of::<u32>()];
+    if !read_complete(input, &mut encoded_length).map_err(|source| Error::Io {
+        operation: "read from",
+        path: path.to_owned(),
+        source,
+    })? {
+        let _position = input
+            .seek(SeekFrom::Start(start))
+            .map_err(|source| Error::Io {
+                operation: "rewind",
+                path: path.to_owned(),
+                source,
+            })?;
+        return Ok(None);
+    }
+    let length = u32::from_le_bytes(encoded_length) as usize;
+    if length > MAX_OBSERVATION_BYTES {
+        return invalid_observation_journal(
+            path,
+            format!("record length {length} exceeds {MAX_OBSERVATION_BYTES} bytes"),
+        );
+    }
+    let mut bytes = vec![0_u8; length];
+    if !read_complete(input, &mut bytes).map_err(|source| Error::Io {
+        operation: "read from",
+        path: path.to_owned(),
+        source,
+    })? {
+        let _position = input
+            .seek(SeekFrom::Start(start))
+            .map_err(|source| Error::Io {
+                operation: "rewind",
+                path: path.to_owned(),
+                source,
+            })?;
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn read_complete(input: &mut File, bytes: &mut [u8]) -> std::io::Result<bool> {
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let read = input.read(&mut bytes[cursor..])?;
+        if read == 0 {
+            return Ok(false);
+        }
+        cursor += read;
+    }
+    Ok(true)
+}
+
+fn read_journal_header(input: &mut File, path: &Path, bytes: &mut [u8]) -> Result<()> {
+    input.read_exact(bytes).map_err(|source| Error::Io {
+        operation: "read header from",
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn read_observation_u32(input: &mut File, path: &Path, field: &str) -> Result<u32> {
+    let mut bytes = [0_u8; size_of::<u32>()];
+    read_journal_header(input, path, &mut bytes)?;
+    let value = u32::from_le_bytes(bytes);
+    if field == "launch length" && value as usize > MAX_OBSERVATION_BYTES {
+        return invalid_observation_journal(path, "launch seal is unreasonably large");
+    }
+    Ok(value)
+}
+
+fn invalid_observation_journal<T>(path: &Path, detail: impl Into<String>) -> Result<T> {
+    Err(Error::ObservationJournal {
+        path: path.to_owned(),
+        detail: detail.into(),
+    })
 }
 
 fn append_frame(output: &mut File, path: &Path, sample: FrameSample) -> Result<()> {
@@ -691,6 +936,47 @@ mod tests {
         assert_eq!(
             read_frame_journal(temporary.path(), "launch").expect("read journal"),
             vec![first, second]
+        );
+    }
+
+    #[test]
+    fn observation_journal_retains_brief_and_partial_records() {
+        #[derive(Debug, Deserialize, PartialEq, Serialize)]
+        struct Mark {
+            value: u8,
+        }
+
+        let root = tempfile::tempdir().expect("temporary journal root");
+        let snapshot = root.path().join("witness.json");
+        let path = observation_path(&snapshot);
+        let mut output = open_observation_journal(&path, "launch").expect("journal header");
+        let first = serde_json::to_vec(&Mark { value: 1 }).expect("first record");
+        append_observation(&mut output, &path, &first).expect("append first record");
+        let second = serde_json::to_vec(&Mark { value: 2 }).expect("second record");
+        let length = u32::try_from(second.len())
+            .expect("tiny record length")
+            .to_le_bytes();
+        output.write_all(&length).expect("partial record length");
+        output.write_all(&second[..2]).expect("partial record body");
+
+        let mut reader = ObservationJournal::sealed(&snapshot, "launch");
+        assert_eq!(
+            reader.read_new::<Mark>().expect("first read"),
+            vec![Mark { value: 1 }]
+        );
+        assert!(
+            reader
+                .read_new::<Mark>()
+                .expect("partial tail is not corruption")
+                .is_empty()
+        );
+
+        output
+            .write_all(&second[2..])
+            .expect("complete second record");
+        assert_eq!(
+            reader.read_new::<Mark>().expect("second read"),
+            vec![Mark { value: 2 }]
         );
     }
 

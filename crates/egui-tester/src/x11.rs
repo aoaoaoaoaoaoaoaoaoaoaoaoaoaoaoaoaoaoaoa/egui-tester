@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::de::DeserializeOwned;
 use x11rb::{
     CURRENT_TIME,
     connection::Connection as _,
@@ -26,7 +27,7 @@ use x11rb::{
 use xkeysym::Keysym;
 
 use crate::{
-    ActionReceipt, Application, Error, Frame, JsonProbe, Quiet, Result, Testbed, pixels::wait_quiet,
+    ActionReceipt, Application, Error, Frame, Probe, Quiet, Result, Testbed, pixels::wait_quiet,
 };
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
@@ -975,7 +976,11 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
     }
 
     /// Wait for the standard post-present witness, then sample product pixels.
-    pub fn wait_presented(&self, probe: &mut JsonProbe, timeout: Duration) -> Result<Frame> {
+    pub fn wait_presented<S: DeserializeOwned>(
+        &self,
+        probe: &mut Probe<S>,
+        timeout: Duration,
+    ) -> Result<Frame> {
         let _presented = probe.wait_presented(self.app, timeout)?;
         self.capture()
     }

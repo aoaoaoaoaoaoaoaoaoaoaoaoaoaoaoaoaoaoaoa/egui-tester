@@ -13,7 +13,7 @@ pub enum PerformanceEndpoint {
 }
 
 impl PerformanceEndpoint {
-    pub(crate) const fn timestamp(self, frame: &ProbeFrame) -> u64 {
+    pub(crate) const fn timestamp<S>(self, frame: &ProbeFrame<S>) -> u64 {
         match self {
             Self::Observation => frame.observed_ns,
             Self::Presentation => frame.presented_ns,

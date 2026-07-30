@@ -228,18 +228,12 @@ impl<'a> Application<'a> {
                 std::fs::create_dir_all(parent)
                     .map_err(|err| io("create witness parent", parent, err))?;
             }
-            match std::fs::remove_file(&witness.host) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(io("remove stale witness", &witness.host, err)),
-            }
-            match std::fs::remove_file(&witness.frame_host) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    return Err(io("remove stale frame journal", &witness.frame_host, err));
-                }
-            }
+            remove_stale(&witness.host, "remove stale witness")?;
+            remove_stale(&witness.frame_host, "remove stale frame journal")?;
+            remove_stale(
+                &egui_tester_witness::observation_path(&witness.host),
+                "remove stale observation journal",
+            )?;
         }
 
         let bwrap = bwrap_argv(testbed, &command, &binary, &borrows, witness.as_ref())?;
@@ -819,6 +813,14 @@ fn create_empty(path: &Path) -> Result<()> {
     std::fs::File::create(path)
         .map(|_| ())
         .map_err(|err| io("create service log", path, err))
+}
+
+fn remove_stale(path: &Path, operation: &'static str) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(io(operation, path, err)),
+    }
 }
 
 fn command_failure(command: &Command, output: &Output) -> String {

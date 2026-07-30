@@ -79,6 +79,13 @@ pass plugin clears anchors before every egui pass, including replacement passes
 requested through `Context::request_discard`. A transition predicate should
 still require both the new state and a control that belongs to that state.
 
+The atomically replaced JSON file is the latest-state surface. The publisher
+also appends the identical serialized frame to a launch-sealed, length-framed
+observation journal. Budgeted Reactions consume complete records in
+presentation order and select the earliest causal match. Thus a valid
+intermediate state cannot be overwritten between harness polls; incomplete
+live tails are retained for the next read rather than treated as corruption.
+
 A witness transition still must not substitute for a product verdict. It may
 release a subsequent pixel or external-oracle wait.
 
@@ -114,6 +121,10 @@ completion. `CadenceBudget` subtracts each preceding frame’s
 cadence; p95 frame work remains the unadjusted
 `begun_ns..presented_ns` product interval.
 
+The semantic observation journal is distinct from the low-tax cadence journal.
+The former is richer and read only while synchronizing Reactions; the latter
+is fixed-width and supplies sustained frame distributions.
+
 Run performance acceptance against an optimized product binary. Software
 graphics is a conservative presentation environment; use
 `Graphics::Host` only when the question specifically requires representative
@@ -126,10 +137,12 @@ changing the operator's desktop session. Output capture is already a real
 compositor observation.
 
 Input remains a named gap. Wayland gives input authority to the compositor,
-not arbitrary clients. The correct next increment is a small Weston test
+not arbitrary clients. A future implementation would require a Weston test
 plugin or another compositor test protocol that synthesizes seat events before
 normal dispatch. AccessKit actions are unsuitable as the primary E2E input
-path because they bypass pointer and keyboard handling.
+path because they bypass pointer and keyboard handling. This work is
+deliberately deferred: X11 is the sole release-tested vertical until its full
+architecture survives another product adoption.
 
 ## Future Surfaces
 

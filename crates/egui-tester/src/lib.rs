@@ -5,20 +5,24 @@
 //! synchronize frames, but they are deliberately incapable of mutating the
 //! application.
 
+mod condition;
 mod error;
 mod frames;
 mod pixels;
 mod probe;
 mod service;
+mod story;
 mod testbed;
 mod timing;
 mod x11;
 
+pub use condition::{Condition, Field, field, state};
 pub use error::{Error, Result};
 pub use frames::{CadenceBudget, CadenceReport, FrameProbe, FrameSample, FrameTrace};
 pub use pixels::{Frame, Quiet};
-pub use probe::{Anchor, JsonProbe, ProbeFrame};
+pub use probe::{Anchor, JsonProbe, Probe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
+pub use story::{Reaction, Story, Target, demand};
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
 pub use timing::{ActionReceipt, PerformanceBudget, PerformanceEndpoint, Timed};
 pub use x11::{

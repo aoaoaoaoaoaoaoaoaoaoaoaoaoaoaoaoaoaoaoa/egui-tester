@@ -19,15 +19,17 @@ The X11 backend is the complete MVP:
   change, and pixel quiescence
 - versioned, launch-sealed, post-present witnesses through
   `egui-tester-witness`
+- typed `Story<S>`, Target, diagnostic Condition, and Reaction porcelain over
+  the native kernel
 - input-to-observation and input-to-presentation performance budgets
-- lossless frame journals with witness-tax-corrected cadence budgets
+- lossless semantic and frame journals with earliest-causal reactions and
+  witness-tax-corrected cadence budgets
 - action transcripts, last-good captures, and automatic failure bundles
 
-The Wayland backend owns a headless Weston compositor and captures its virtual
-output through `weston-screenshooter`. Launch-and-pixel smoke tests therefore
-work on an X11 workstation. Generic real input is not yet claimed: Wayland
-intentionally has no XTEST-like client protocol, so that requires a
-compositor-side test input facility.
+X11 is the sole release-tested vertical. The Wayland backend owns a headless
+Weston compositor and can run an explicitly optional launch-and-capture smoke,
+but it has no native-input or acceptance-parity claim. Wayland work is deferred
+until the X11 architecture survives another full product adoption.
 
 ## Containment
 
@@ -54,8 +56,10 @@ representative performance runs; it still grants no writable host files.
 ## Model
 
 A **witness** answers “where is the control?” or “has a newer product frame
-been presented?” The standard witness is one-way, atomic, launch-sealed
-telemetry. Legacy application probes remain readable during migration.
+been presented?” Its atomic, launch-sealed snapshot supplies current state and
+hit-test bounds. A companion length-framed journal retains every presented
+semantic observation, so a brief causal state cannot vanish between polls.
+Legacy application probes remain readable during migration.
 
 An **oracle** answers “did the product work?” Oracles are captured pixels,
 files the product emitted into private state, process exits, or externally
@@ -81,6 +85,13 @@ excluded. Observation budgets end after product-state work and before witness
 work. Calling `through_presentation()` instead ends after the corresponding
 real frame was presented. Polling, screenshots, anchor extraction,
 serialization, and witness I/O cannot consume either budget.
+
+`Story<S>` is the ordinary-Rust authoring layer. It binds a typed partial
+Observation, a native X11 session, default budgets, and the standard witness.
+Each gesture returns a `Reaction`; `.expect(condition)` selects the earliest
+causal semantic frame from the lossless journal and adjudicates its production
+timestamp. Product-specific story executables remain thin and own fixtures and
+oracles.
 
 Sustained interactions use `Application::frames`, `FrameProbe::trace`, and
 `CadenceBudget`. The frame journal records begin, semantic observation,
@@ -167,7 +178,7 @@ creation and local provider acquisition; rename, pin drag, undo/redo, cancel,
 save, and restart; twelve-candidate comparison under pan/zoom cadence budgets;
 and manual partial-edge loop drawing with profile interaction and restart.
 
-Wayland validation is optional until Weston is installed:
+The experimental Wayland capture smoke is outside the current release claim:
 
 ```console
 cargo test -p egui-tester-fixture --test wayland -- --ignored

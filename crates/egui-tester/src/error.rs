@@ -34,6 +34,16 @@ pub enum Error {
     #[error("timed out after {timeout:?} waiting for {waiting}")]
     Timeout { waiting: String, timeout: Duration },
 
+    #[error("condition remained unsatisfied after {timeout:?} while {waiting}: {last_mismatch}")]
+    Condition {
+        waiting: String,
+        timeout: Duration,
+        last_mismatch: String,
+    },
+
+    #[error("product verdict failed: {detail}")]
+    Verdict { detail: String },
+
     #[error("performance budget breached for {operation}: observed {elapsed:?}, budget {budget:?}")]
     TooSlow {
         operation: String,

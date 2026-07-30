@@ -1,20 +1,21 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     io::ErrorKind,
+    marker::PhantomData,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
 
 pub use egui_tester_witness::Anchor;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{ActionReceipt, Application, Error, PerformanceBudget, Result, Timed, error::io};
 
 /// One atomic witness snapshot.
 #[derive(Clone, Debug, Deserialize)]
-pub struct ProbeFrame {
+pub struct ProbeFrame<S = Value> {
     #[serde(default)]
     pub schema: u32,
     #[serde(default)]
@@ -31,11 +32,10 @@ pub struct ProbeFrame {
     #[serde(default)]
     pub ppp: Option<f32>,
     pub anchors: Vec<Anchor>,
-    #[serde(default)]
-    pub state: Value,
+    pub state: S,
 }
 
-impl ProbeFrame {
+impl<S> ProbeFrame<S> {
     #[must_use]
     pub fn anchor(&self, name: &str) -> Option<&Anchor> {
         self.anchors.iter().find(|anchor| anchor.name == name)
@@ -44,11 +44,16 @@ impl ProbeFrame {
 
 /// Reader for the standard atomic one-way witness file.
 #[derive(Debug)]
-pub struct JsonProbe {
+pub struct Probe<S = Value> {
     path: PathBuf,
     expected_launch: Option<String>,
     last_frame: u64,
+    journal: Option<egui_tester_witness::ObservationJournal>,
+    journal_queue: VecDeque<ProbeFrame<S>>,
+    state: PhantomData<fn() -> S>,
 }
+
+pub type JsonProbe = Probe<Value>;
 
 struct Stability<T>(Option<(T, Instant)>);
 
@@ -72,7 +77,7 @@ impl<T: PartialEq> Stability<T> {
     }
 }
 
-impl JsonProbe {
+impl Probe<Value> {
     /// Open a legacy or externally configured witness without a launch seal.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -80,23 +85,61 @@ impl JsonProbe {
             path: path.into(),
             expected_launch: None,
             last_frame: 0,
+            journal: None,
+            journal_queue: VecDeque::new(),
+            state: PhantomData,
         }
     }
 
     pub(crate) fn sealed(path: impl Into<PathBuf>, launch: impl Into<String>) -> Self {
+        let path = path.into();
+        let launch = launch.into();
         Self {
-            path: path.into(),
-            expected_launch: Some(launch.into()),
+            journal: Some(egui_tester_witness::ObservationJournal::sealed(
+                &path,
+                launch.clone(),
+            )),
+            path,
+            expected_launch: Some(launch),
             last_frame: 0,
+            journal_queue: VecDeque::new(),
+            state: PhantomData,
         }
     }
 
-    pub fn read(&self) -> Result<ProbeFrame> {
+    /// Decode the product-owned state into an acceptance-owned observation.
+    ///
+    /// The observation may deliberately deserialize only the fields consumed
+    /// by its stories. This keeps the witness one-way without coupling an
+    /// acceptance executable to product internals.
+    #[must_use]
+    pub fn typed<T>(self) -> Probe<T> {
+        Probe {
+            path: self.path,
+            expected_launch: self.expected_launch,
+            last_frame: self.last_frame,
+            journal: self.journal,
+            journal_queue: VecDeque::new(),
+            state: PhantomData,
+        }
+    }
+}
+
+impl<S> Probe<S> {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl<S: DeserializeOwned> Probe<S> {
+    pub fn read(&self) -> Result<ProbeFrame<S>> {
         let bytes = std::fs::read(&self.path).map_err(|err| io("read witness", &self.path, err))?;
-        let frame = serde_json::from_slice::<ProbeFrame>(&bytes).map_err(|err| Error::Probe {
-            path: self.path.clone(),
-            detail: err.to_string(),
-        })?;
+        let frame =
+            serde_json::from_slice::<ProbeFrame<S>>(&bytes).map_err(|err| Error::Probe {
+                path: self.path.clone(),
+                detail: err.to_string(),
+            })?;
         self.validate(&frame)?;
         Ok(frame)
     }
@@ -106,27 +149,66 @@ impl JsonProbe {
         app: &Application<'_>,
         timeout: Duration,
         description: impl Into<String>,
-        mut predicate: impl FnMut(&ProbeFrame) -> bool,
-    ) -> Result<ProbeFrame> {
+        mut predicate: impl FnMut(&ProbeFrame<S>) -> bool,
+    ) -> Result<ProbeFrame<S>> {
+        self.wait_inspecting(app, timeout, description, |frame| {
+            predicate(frame).then_some(()).ok_or(None)
+        })
+    }
+
+    pub fn wait_checked(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+        description: impl Into<String>,
+        mut predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
+    ) -> Result<ProbeFrame<S>> {
+        self.wait_inspecting(app, timeout, description, |frame| {
+            predicate(frame).map_err(Some)
+        })
+    }
+
+    fn wait_inspecting(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+        description: impl Into<String>,
+        mut inspect: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), Option<String>>,
+    ) -> Result<ProbeFrame<S>> {
         let description = description.into();
         let deadline = Instant::now() + timeout;
         let mut invalid = None;
+        let mut last_mismatch = None;
         loop {
             app.ensure_running(&description)?;
             match self.read() {
-                Ok(frame) if predicate(&frame) => {
-                    self.last_frame = frame.frame;
-                    return Ok(frame);
+                Ok(frame) => {
+                    invalid = None;
+                    match inspect(&frame) {
+                        Ok(()) => {
+                            self.last_frame = frame.frame;
+                            return Ok(frame);
+                        }
+                        Err(mismatch) => last_mismatch = mismatch,
+                    }
                 }
-                Ok(_) => invalid = None,
                 Err(Error::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {}
                 Err(err @ Error::Probe { .. }) => invalid = Some(err),
                 Err(err) => return Err(err),
             }
             if Instant::now() >= deadline {
-                return Err(invalid.unwrap_or(Error::Timeout {
-                    waiting: description,
-                    timeout,
+                return Err(invalid.unwrap_or_else(|| {
+                    last_mismatch.map_or_else(
+                        || Error::Timeout {
+                            waiting: description.clone(),
+                            timeout,
+                        },
+                        |last_mismatch| Error::Condition {
+                            waiting: description.clone(),
+                            timeout,
+                            last_mismatch,
+                        },
+                    )
                 }));
             }
             thread::sleep(Duration::from_millis(12));
@@ -148,7 +230,11 @@ impl JsonProbe {
         })
     }
 
-    pub fn wait_fresh(&mut self, app: &Application<'_>, timeout: Duration) -> Result<ProbeFrame> {
+    pub fn wait_fresh(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+    ) -> Result<ProbeFrame<S>> {
         let prior = self.last_frame;
         self.wait(
             app,
@@ -162,7 +248,7 @@ impl JsonProbe {
         &mut self,
         app: &Application<'_>,
         timeout: Duration,
-    ) -> Result<ProbeFrame> {
+    ) -> Result<ProbeFrame<S>> {
         self.wait(
             app,
             timeout,
@@ -182,8 +268,8 @@ impl JsonProbe {
         timeout: Duration,
         quiet: Duration,
         description: impl Into<String>,
-        mut project: impl FnMut(&ProbeFrame) -> Option<T>,
-    ) -> Result<ProbeFrame> {
+        mut project: impl FnMut(&ProbeFrame<S>) -> Option<T>,
+    ) -> Result<ProbeFrame<S>> {
         let description = description.into();
         let deadline = Instant::now() + timeout;
         let mut stable = Stability::new();
@@ -227,31 +313,141 @@ impl JsonProbe {
         receipt: &ActionReceipt,
         budget: PerformanceBudget,
         description: impl Into<String>,
-        mut predicate: impl FnMut(&ProbeFrame) -> bool,
-    ) -> Result<Timed<ProbeFrame>> {
+        mut predicate: impl FnMut(&ProbeFrame<S>) -> bool,
+    ) -> Result<Timed<ProbeFrame<S>>> {
+        self.wait_budgeted_checked(app, receipt, budget, description, |frame| {
+            predicate(frame)
+                .then_some(())
+                .ok_or_else(|| "semantic predicate did not match".to_owned())
+        })
+    }
+
+    pub fn wait_budgeted_checked(
+        &mut self,
+        app: &Application<'_>,
+        receipt: &ActionReceipt,
+        budget: PerformanceBudget,
+        description: impl Into<String>,
+        mut predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
+    ) -> Result<Timed<ProbeFrame<S>>> {
         let description = description.into();
+        if self.journal.is_some() {
+            return self.wait_budgeted_journal(app, receipt, budget, description, predicate);
+        }
         let prior = self.last_frame;
         let endpoint = budget.endpoint();
-        let frame = self.wait(
+        let frame = self.wait_checked(
             app,
             budget.functional_timeout(),
             description.clone(),
             |frame| {
-                frame.frame > prior
-                    && frame.begun_ns >= receipt.triggered_ns()
-                    && endpoint.timestamp(frame) >= receipt.triggered_ns()
-                    && predicate(frame)
+                if frame.frame <= prior {
+                    return Err(format!(
+                        "frame {} is not newer than prior frame {prior}",
+                        frame.frame
+                    ));
+                }
+                if frame.begun_ns < receipt.triggered_ns() {
+                    return Err(format!(
+                        "frame began at {} before input trigger {}",
+                        frame.begun_ns,
+                        receipt.triggered_ns()
+                    ));
+                }
+                let timestamp = endpoint.timestamp(frame);
+                if timestamp < receipt.triggered_ns() {
+                    return Err(format!(
+                        "{endpoint:?} timestamp {timestamp} predates input trigger {}",
+                        receipt.triggered_ns()
+                    ));
+                }
+                predicate(frame)
             },
         )?;
         budget.adjudicate(description, receipt, endpoint.timestamp(&frame), frame)
     }
 
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    fn wait_budgeted_journal(
+        &mut self,
+        app: &Application<'_>,
+        receipt: &ActionReceipt,
+        budget: PerformanceBudget,
+        description: String,
+        mut predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
+    ) -> Result<Timed<ProbeFrame<S>>> {
+        let prior = self.last_frame;
+        let endpoint = budget.endpoint();
+        let timeout = budget.functional_timeout();
+        let deadline = Instant::now() + timeout;
+        let mut last_mismatch = None;
+        loop {
+            app.ensure_running(&description)?;
+            self.refill_journal()?;
+            while let Some(frame) = self.journal_queue.pop_front() {
+                self.validate(&frame)?;
+                if frame.frame <= prior || frame.begun_ns < receipt.triggered_ns() {
+                    continue;
+                }
+                let timestamp = endpoint.timestamp(&frame);
+                if timestamp < receipt.triggered_ns() {
+                    continue;
+                }
+                match predicate(&frame) {
+                    Ok(()) => {
+                        self.last_frame = frame.frame;
+                        return budget.adjudicate(description, receipt, timestamp, frame);
+                    }
+                    Err(mismatch) => last_mismatch = Some(mismatch),
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(last_mismatch.map_or_else(
+                    || Error::Timeout {
+                        waiting: description.clone(),
+                        timeout,
+                    },
+                    |last_mismatch| Error::Condition {
+                        waiting: description.clone(),
+                        timeout,
+                        last_mismatch,
+                    },
+                ));
+            }
+            thread::sleep(Duration::from_millis(8));
+        }
     }
 
-    fn validate(&self, frame: &ProbeFrame) -> Result<()> {
+    fn refill_journal(&mut self) -> Result<()> {
+        let Some(journal) = &mut self.journal else {
+            return Ok(());
+        };
+        match journal.read_new::<ProbeFrame<S>>() {
+            Ok(frames) => {
+                self.journal_queue.extend(frames);
+                Ok(())
+            }
+            Err(egui_tester_witness::Error::Io { source, .. })
+                if source.kind() == ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(egui_tester_witness::Error::Io {
+                source,
+                operation,
+                path,
+            }) => Err(Error::Io {
+                operation,
+                path,
+                source,
+            }),
+            Err(error) => Err(Error::Probe {
+                path: journal.path().to_owned(),
+                detail: error.to_string(),
+            }),
+        }
+    }
+
+    fn validate(&self, frame: &ProbeFrame<S>) -> Result<()> {
         if let Some(expected) = &self.expected_launch {
             if frame.schema != egui_tester_witness::SCHEMA {
                 return self.invalid(format!(

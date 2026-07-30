@@ -8,6 +8,12 @@ fixture seeding, witness predicates, performance budgets, and real oracles.
 Containment, display input, synchronization, timing, transcripts, and failure
 artifacts remain library responsibilities.
 
+The executable defines an acceptance-owned, deliberately partial
+`Deserialize` Observation and drives the product through `Story<Observation>`.
+Stable product Targets should live in a dependency-free product contract crate
+shared with the GUI. Implementing `AsRef<str>` admits them directly to the
+tester without making that contract depend on `egui-tester`.
+
 The product exposes an `egui-test` feature that adds
 `egui-tester-witness`. This feature is telemetry, never a control plane. The
 acceptance executable must still launch the real optimized product binary and
@@ -58,6 +64,10 @@ Anchors are stable intent names such as `library.rename` or
 layout positions or implementation types. Semantic state should expose facts
 needed for synchronization, not duplicate the product model wholesale.
 
+The product should publish a contract fingerprint in that minimal state.
+Every story verifies it before the first injected input. A stale test binary
+must fail as a schema mismatch rather than gesture against misnamed controls.
+
 ## Scenario Law
 
 Every acceptance step has three distinct layers:
@@ -70,6 +80,11 @@ Witness state may prove that a route was recomputed; persisted geometry or
 pixels decide whether the product worked. Require controls belonging to the
 new state in transition predicates, for example `view == "edit"` together
 with `editor.support/1`.
+
+The atomic witness supplies current state and bounds. Budgeted Reactions read
+the lossless semantic journal and choose the earliest causally eligible frame;
+do not compensate for polling cadence with sleeps or an enlarged production
+budget.
 
 Fast native batches still obey human gesture causality. Modified clicks guard
 modifier acquisition and release so an event loop cannot observe only the
@@ -127,6 +142,14 @@ The action must last long enough to produce a distribution. Lengthen the
 gesture when it yields too few samples; do not weaken the minimum merely to
 make a short trace pass.
 
+## Platform Claim
+
+X11 is the complete and release-tested backend: native input, private display,
+capture, semantic and presentation fencing, budgets, and artifacts. Product
+adoptions should first make this vertical incontrovertible. The optional
+headless Wayland capture smoke is not parity, and no adoption should spend
+architecture on Wayland until the X11 pattern has survived the next product.
+
 ## Skill Scaffold
 
 An app-building skill may generate the conventional crate, script, feature,
@@ -139,8 +162,10 @@ oracle. Those are product decisions and must not be fabricated by middleware.
 No adoption may hide an unsupported behavior behind xdotool. Park the story and
 name the missing shared capability instead. The present defects are:
 
-- generic native input on the Wayland backend;
 - window move/resize, multi-window focus, native dialogs, and tray surfaces;
 - AccessKit selectors that can replace app-authored target anchors;
 - clipboard, IME, and text beyond the current Latin-1 injector;
 - a serializable selector/action timeline shared by tests and demo recording.
+
+Generic native Wayland input remains a known horizontal-expansion gap, but is
+deliberately deferred rather than part of the present adoption contract.
