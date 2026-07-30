@@ -4,6 +4,7 @@ use std::{
     collections::BTreeSet,
     ffi::OsString,
     fs,
+    io::{Read as _, Write as _},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -98,7 +99,8 @@ impl TestbedBuilder {
         }
         let user_bus = UserBus::discover()?;
         let ordinal = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
-        let id = format!("{}-{ordinal}", std::process::id());
+        let nonce = random_cookie()?;
+        let id = format!("{}-{ordinal}-{}", std::process::id(), &nonce[..12]);
         let root = tempfile::Builder::new()
             .prefix(&format!("egui-tester-{id}-"))
             .tempdir_in("/tmp")
@@ -192,6 +194,11 @@ impl Testbed {
         self.root.path()
     }
 
+    /// Resolve a path handle inside the owned tree.
+    ///
+    /// This is appropriate for APIs that must watch a live path. Use
+    /// `read_private`, `write_private`, or `export` for oracle I/O: those
+    /// capability operations refuse symlinks created by the application.
     pub fn private_path(&self, relative: impl AsRef<Path>) -> Result<PathBuf> {
         let relative = relative.as_ref();
         validate_relative(relative)?;
@@ -204,8 +211,9 @@ impl Testbed {
     }
 
     pub fn create_private_dir(&self, relative: impl AsRef<Path>) -> Result<PathBuf> {
+        let relative = relative.as_ref();
         let path = self.private_path(relative)?;
-        fs::create_dir_all(&path).map_err(|err| io("create private directory", &path, err))?;
+        self.create_private_dirs(relative)?;
         Ok(path)
     }
 
@@ -214,12 +222,12 @@ impl Testbed {
         relative: impl AsRef<Path>,
         bytes: impl AsRef<[u8]>,
     ) -> Result<PathBuf> {
+        let relative = relative.as_ref();
         let path = self.private_path(relative)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| io("create private file parent", parent, err))?;
-        }
-        fs::write(&path, bytes).map_err(|err| io("write private file", &path, err))?;
+        let mut output = self.open_private_write(relative)?;
+        output
+            .write_all(bytes.as_ref())
+            .map_err(|err| io("write private file", &path, err))?;
         Ok(path)
     }
 
@@ -228,14 +236,39 @@ impl Testbed {
         relative: impl AsRef<Path>,
         source: impl AsRef<Path>,
     ) -> Result<PathBuf> {
+        let relative = relative.as_ref();
         let destination = self.private_path(relative)?;
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| io("create private copy parent", parent, err))?;
-        }
-        let _bytes = fs::copy(source.as_ref(), &destination)
+        let mut input = fs::File::open(source.as_ref())
+            .map_err(|err| io("open fixture for private copy", source.as_ref(), err))?;
+        let mut output = self.open_private_write(relative)?;
+        let _bytes = std::io::copy(&mut input, &mut output)
             .map_err(|err| io("copy fixture into private tree", &destination, err))?;
         Ok(destination)
+    }
+
+    /// Read one file beneath the private root without following app-created
+    /// symlinks or escaping through magic links.
+    pub fn read_private(&self, relative: impl AsRef<Path>) -> Result<Vec<u8>> {
+        let relative = relative.as_ref();
+        let path = self.private_path(relative)?;
+        let mut input = self.open_private_read(relative)?;
+        let mut bytes = Vec::new();
+        let _bytes_read = input
+            .read_to_end(&mut bytes)
+            .map_err(|err| io("read private file", path, err))?;
+        Ok(bytes)
+    }
+
+    pub fn read_private_to_string(&self, relative: impl AsRef<Path>) -> Result<String> {
+        let relative = relative.as_ref();
+        let bytes = self.read_private(relative)?;
+        String::from_utf8(bytes).map_err(|error| Error::Containment {
+            layer: "private filesystem",
+            detail: format!(
+                "private file `{}` is not UTF-8: {error}",
+                relative.display()
+            ),
+        })
     }
 
     pub fn launch(&self, command: AppCommand) -> Result<Application<'_>> {
@@ -280,15 +313,19 @@ impl Testbed {
     ///
     /// The copy is performed by the harness, never by the sandboxed app.
     pub fn export(&self, relative: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
+        let relative = relative.as_ref();
         let source = self.private_path(relative)?;
         let destination = destination.as_ref();
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)
                 .map_err(|err| io("create artifact directory", parent, err))?;
         }
-        fs::copy(&source, destination)
+        let mut input = self.open_private_read(relative)?;
+        let mut output = fs::File::create(destination)
+            .map_err(|err| io("create exported artifact", destination, err))?;
+        std::io::copy(&mut input, &mut output)
             .map(|_| ())
-            .map_err(|err| io("export private artifact", destination, err))
+            .map_err(|err| io("export private artifact", &source, err))
     }
 
     /// Include one private file or tree in failure diagnostics.
@@ -313,6 +350,128 @@ impl Testbed {
 
     pub(crate) fn diagnostic_path(&self, relative: impl AsRef<Path>) -> PathBuf {
         self.host_path(Path::new("diagnostics").join(relative))
+    }
+
+    fn open_private_read(&self, relative: &Path) -> Result<fs::File> {
+        validate_relative(relative)?;
+        let root = self.open_private_root()?;
+        let fd = rustix::fs::openat2(
+            &root,
+            relative,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            private_resolve(),
+        )
+        .map_err(|error| io("open confined private file", relative, error.into()))?;
+        Ok(fd.into())
+    }
+
+    fn open_private_write(&self, relative: &Path) -> Result<fs::File> {
+        validate_relative(relative)?;
+        let (parent, leaf) = self.open_private_parent(relative)?;
+        let fd = rustix::fs::openat2(
+            &parent,
+            Path::new(&leaf),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::TRUNC
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            private_resolve(),
+        )
+        .map_err(|error| io("open confined private output", relative, error.into()))?;
+        Ok(fd.into())
+    }
+
+    fn create_private_dirs(&self, relative: &Path) -> Result<()> {
+        validate_relative(relative)?;
+        let mut directory = self.open_private_root()?;
+        for component in relative.components() {
+            let Component::Normal(part) = component else {
+                continue;
+            };
+            match rustix::fs::mkdirat(
+                &directory,
+                part,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR,
+            ) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => {
+                    return Err(io(
+                        "create confined private directory",
+                        relative,
+                        error.into(),
+                    ));
+                }
+            }
+            directory = rustix::fs::openat2(
+                &directory,
+                part,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+                private_resolve(),
+            )
+            .map_err(|error| io("descend confined private directory", relative, error.into()))?;
+        }
+        Ok(())
+    }
+
+    fn open_private_parent(&self, relative: &Path) -> Result<(std::os::fd::OwnedFd, OsString)> {
+        let mut components = relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(part) => Some(part.to_owned()),
+                Component::CurDir => None,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let leaf = components.pop().ok_or_else(|| Error::Containment {
+            layer: "private filesystem",
+            detail: format!("private path `{}` has no filename", relative.display()),
+        })?;
+        let mut directory = self.open_private_root()?;
+        for part in components {
+            match rustix::fs::mkdirat(
+                &directory,
+                &part,
+                rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::XUSR,
+            ) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => {
+                    return Err(io("create confined private parent", relative, error.into()));
+                }
+            }
+            directory = rustix::fs::openat2(
+                &directory,
+                &part,
+                rustix::fs::OFlags::RDONLY
+                    | rustix::fs::OFlags::DIRECTORY
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+                private_resolve(),
+            )
+            .map_err(|error| io("descend confined private parent", relative, error.into()))?;
+        }
+        Ok((directory, leaf))
+    }
+
+    fn open_private_root(&self) -> Result<std::os::fd::OwnedFd> {
+        rustix::fs::open(
+            self.root.path(),
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            io(
+                "open private root capability",
+                self.root.path(),
+                error.into(),
+            )
+        })
     }
 
     fn export_failure_artifacts(&self, sink: &Path) -> Result<()> {
@@ -791,6 +950,12 @@ fn validate_relative(path: &Path) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn private_resolve() -> rustix::fs::ResolveFlags {
+    rustix::fs::ResolveFlags::BENEATH
+        | rustix::fs::ResolveFlags::NO_MAGICLINKS
+        | rustix::fs::ResolveFlags::NO_SYMLINKS
 }
 
 #[cfg(unix)]

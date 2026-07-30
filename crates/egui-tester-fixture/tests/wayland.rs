@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use eframe as _;
-use egui_tester::{AppCommand, Backend, JsonProbe, TestbedBuilder, WaylandConfig};
+use egui_tester::{AppCommand, Backend, LegacyJsonProbe, TestbedBuilder, WaylandConfig};
 use serde as _;
 use serde_json as _;
 use tempfile as _;
@@ -28,7 +28,7 @@ fn launches_and_captures_on_headless_wayland() {
                 .runtime(Duration::from_secs(30)),
         )
         .expect("launch Wayland fixture");
-    let mut probe = JsonProbe::new(probe_path);
+    let mut probe = LegacyJsonProbe::new(probe_path);
     let _frame = probe
         .wait_anchor(&app, "increment", Duration::from_secs(15))
         .expect("observe a rendered Wayland UI frame");

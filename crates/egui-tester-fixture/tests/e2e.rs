@@ -2,7 +2,7 @@ use std::{fs, time::Duration};
 
 use eframe as _;
 use egui_tester::{
-    AppCommand, Button, Drag, JsonProbe, Key, Modifiers, Quiet, Testbed, WindowQuery,
+    AppCommand, Button, Drag, Key, LegacyJsonProbe, Modifiers, Quiet, Testbed, WindowQuery,
 };
 use serde as _;
 use serde_json as _;
@@ -32,7 +32,7 @@ fn drives_real_input_and_observes_pixels() {
         .expect("find fixture window");
     session.focus().expect("focus fixture");
 
-    let mut probe = JsonProbe::new(probe_path);
+    let mut probe = LegacyJsonProbe::new(probe_path);
     let increment = probe
         .wait_anchor(&app, "increment", Duration::from_secs(5))
         .expect("locate increment button");
@@ -263,5 +263,40 @@ fn result_failures_retain_registered_artifacts() {
     assert_eq!(
         fs::read(session.path().join("project/oracle.txt")).expect("read retained oracle"),
         b"retained"
+    );
+}
+
+#[test]
+fn private_oracles_refuse_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let outside = tempfile::tempdir().expect("create outside tree");
+    let secret = outside.path().join("secret");
+    fs::write(&secret, b"sealed").expect("seed outside file");
+    let testbed = Testbed::raise().expect("raise hermetic testbed");
+    let project = testbed
+        .create_private_dir("project")
+        .expect("create private project");
+    symlink(&secret, project.join("escape")).expect("forge hostile file symlink");
+    symlink(outside.path(), project.join("outside")).expect("forge hostile directory symlink");
+
+    assert!(
+        testbed.read_private("project/escape").is_err(),
+        "private oracle followed an app-controlled file symlink"
+    );
+    assert!(
+        testbed
+            .write_private("project/outside/pwned", b"breach")
+            .is_err(),
+        "private writer followed an app-controlled directory symlink"
+    );
+    assert_eq!(
+        fs::read(&secret).expect("read outside sentinel"),
+        b"sealed",
+        "confined oracle mutated outside state"
+    );
+    assert!(
+        !outside.path().join("pwned").exists(),
+        "confined writer escaped through a private symlink"
     );
 }

@@ -8,29 +8,23 @@ use std::{
 };
 
 pub use egui_tester_witness::Anchor;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::{ActionReceipt, Application, Error, PerformanceBudget, Result, Timed, error::io};
+use crate::{ActionReceipt, Application, Error, ReactionBudget, Result, Timed, error::io};
 
-/// One atomic witness snapshot.
+/// One sealed observation from the standard semantic journal.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProbeFrame<S = Value> {
-    #[serde(default)]
     pub schema: u32,
-    #[serde(default)]
     pub launch: String,
     pub frame: u64,
-    #[serde(default)]
     pub begun_ns: u64,
-    #[serde(default)]
     pub observed_ns: u64,
-    #[serde(default)]
-    pub presented_ns: u64,
-    #[serde(default)]
-    pub presentation: u64,
-    #[serde(default)]
-    pub ppp: Option<f32>,
+    pub surface_presented_ns: u64,
+    pub surface_sequence: u64,
+    pub ppp: f32,
     pub anchors: Vec<Anchor>,
     pub state: S,
 }
@@ -42,18 +36,27 @@ impl<S> ProbeFrame<S> {
     }
 }
 
-/// Reader for the standard atomic one-way witness file.
+/// Incremental reader for the standard sealed semantic journal.
+///
+/// Every complete record is consumed exactly once and the newest record is
+/// retained as the current frame. There is no competing snapshot surface.
 #[derive(Debug)]
 pub struct Probe<S = Value> {
     path: PathBuf,
-    expected_launch: Option<String>,
-    last_frame: u64,
-    journal: Option<egui_tester_witness::ObservationJournal>,
-    journal_queue: VecDeque<ProbeFrame<S>>,
+    launch: String,
+    cursor: ProbeCursor,
+    journal: egui_tester_witness::ObservationJournal,
+    pending: VecDeque<Vec<u8>>,
+    current: Option<Vec<u8>>,
     state: PhantomData<fn() -> S>,
 }
 
-pub type JsonProbe = Probe<Value>;
+#[derive(Clone, Copy, Debug, Default)]
+struct ProbeCursor {
+    frame: u64,
+    surface_sequence: u64,
+    begun_ns: u64,
+}
 
 struct Stability<T>(Option<(T, Instant)>);
 
@@ -78,48 +81,32 @@ impl<T: PartialEq> Stability<T> {
 }
 
 impl Probe<Value> {
-    /// Open a legacy or externally configured witness without a launch seal.
-    #[must_use]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-            expected_launch: None,
-            last_frame: 0,
-            journal: None,
-            journal_queue: VecDeque::new(),
-            state: PhantomData,
-        }
-    }
-
     pub(crate) fn sealed(path: impl Into<PathBuf>, launch: impl Into<String>) -> Self {
         let path = path.into();
         let launch = launch.into();
         Self {
-            journal: Some(egui_tester_witness::ObservationJournal::sealed(
-                &path,
-                launch.clone(),
-            )),
+            journal: egui_tester_witness::ObservationJournal::sealed(&path, launch.clone()),
             path,
-            expected_launch: Some(launch),
-            last_frame: 0,
-            journal_queue: VecDeque::new(),
+            launch,
+            cursor: ProbeCursor::default(),
+            pending: VecDeque::new(),
+            current: None,
             state: PhantomData,
         }
     }
 
-    /// Decode the product-owned state into an acceptance-owned observation.
+    /// Decode product state into an acceptance-owned observation.
     ///
-    /// The observation may deliberately deserialize only the fields consumed
-    /// by its stories. This keeps the witness one-way without coupling an
-    /// acceptance executable to product internals.
+    /// The observation may deserialize only fields consumed by its stories.
     #[must_use]
     pub fn typed<T>(self) -> Probe<T> {
         Probe {
             path: self.path,
-            expected_launch: self.expected_launch,
-            last_frame: self.last_frame,
+            launch: self.launch,
+            cursor: self.cursor,
             journal: self.journal,
-            journal_queue: VecDeque::new(),
+            pending: self.pending,
+            current: self.current,
             state: PhantomData,
         }
     }
@@ -133,15 +120,20 @@ impl<S> Probe<S> {
 }
 
 impl<S: DeserializeOwned> Probe<S> {
-    pub fn read(&self) -> Result<ProbeFrame<S>> {
-        let bytes = std::fs::read(&self.path).map_err(|err| io("read witness", &self.path, err))?;
-        let frame =
-            serde_json::from_slice::<ProbeFrame<S>>(&bytes).map_err(|err| Error::Probe {
+    /// Read the newest complete journal record, never regressing.
+    pub fn read(&mut self) -> Result<ProbeFrame<S>> {
+        self.refill()?;
+        let mut newest = None;
+        while let Some(frame) = self.take_next()? {
+            newest = Some(frame);
+        }
+        match newest {
+            Some(frame) => Ok(frame),
+            None => self.current()?.ok_or_else(|| Error::Probe {
                 path: self.path.clone(),
-                detail: err.to_string(),
-            })?;
-        self.validate(&frame)?;
-        Ok(frame)
+                detail: "semantic journal contains no complete observation".to_owned(),
+            }),
+        }
     }
 
     pub fn wait(
@@ -177,41 +169,38 @@ impl<S: DeserializeOwned> Probe<S> {
     ) -> Result<ProbeFrame<S>> {
         let description = description.into();
         let deadline = Instant::now() + timeout;
-        let mut invalid = None;
         let mut last_mismatch = None;
         loop {
             app.ensure_running(&description)?;
-            match self.read() {
-                Ok(frame) => {
-                    invalid = None;
-                    match inspect(&frame) {
-                        Ok(()) => {
-                            self.last_frame = frame.frame;
-                            return Ok(frame);
-                        }
-                        Err(mismatch) => last_mismatch = mismatch,
-                    }
+            self.refill()?;
+            let mut consumed = false;
+            while let Some(frame) = self.take_next()? {
+                consumed = true;
+                match inspect(&frame) {
+                    Ok(()) => return Ok(frame),
+                    Err(mismatch) => last_mismatch = mismatch,
                 }
-                Err(Error::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {}
-                Err(err @ Error::Probe { .. }) => invalid = Some(err),
-                Err(err) => return Err(err),
+            }
+            if !consumed && let Some(frame) = self.current()? {
+                match inspect(&frame) {
+                    Ok(()) => return Ok(frame),
+                    Err(mismatch) => last_mismatch = mismatch,
+                }
             }
             if Instant::now() >= deadline {
-                return Err(invalid.unwrap_or_else(|| {
-                    last_mismatch.map_or_else(
-                        || Error::Timeout {
-                            waiting: description.clone(),
-                            timeout,
-                        },
-                        |last_mismatch| Error::Condition {
-                            waiting: description.clone(),
-                            timeout,
-                            last_mismatch,
-                        },
-                    )
-                }));
+                return Err(last_mismatch.map_or_else(
+                    || Error::Timeout {
+                        waiting: description.clone(),
+                        timeout,
+                    },
+                    |last_mismatch| Error::Condition {
+                        waiting: description.clone(),
+                        timeout,
+                        last_mismatch,
+                    },
+                ));
             }
-            thread::sleep(Duration::from_millis(12));
+            thread::sleep(Duration::from_millis(8));
         }
     }
 
@@ -235,16 +224,16 @@ impl<S: DeserializeOwned> Probe<S> {
         app: &Application<'_>,
         timeout: Duration,
     ) -> Result<ProbeFrame<S>> {
-        let prior = self.last_frame;
+        let prior = self.cursor.surface_sequence;
         self.wait(
             app,
             timeout,
-            format!("witness frame newer than {prior}"),
-            |frame| frame.frame > prior,
+            format!("surface-presented observation newer than {prior}"),
+            |frame| frame.surface_sequence > prior,
         )
     }
 
-    pub fn wait_presented(
+    pub fn wait_surface_presented(
         &mut self,
         app: &Application<'_>,
         timeout: Duration,
@@ -252,16 +241,12 @@ impl<S: DeserializeOwned> Probe<S> {
         self.wait(
             app,
             timeout,
-            "first product frame to be presented",
-            |frame| frame.presentation > 0,
+            "first product frame to reach surface present",
+            |frame| frame.surface_sequence > 0,
         )
     }
 
     /// Wait until a semantic projection remains unchanged for `quiet`.
-    ///
-    /// This fences product kinetics such as inertial scrolling without making
-    /// pixel animation, witness polling, or an arbitrary sleep part of the
-    /// product contract.
     pub fn wait_stable<T: PartialEq>(
         &mut self,
         app: &Application<'_>,
@@ -273,45 +258,51 @@ impl<S: DeserializeOwned> Probe<S> {
         let description = description.into();
         let deadline = Instant::now() + timeout;
         let mut stable = Stability::new();
-        let mut invalid = None;
         loop {
             app.ensure_running(&description)?;
-            match self.read() {
-                Ok(frame) => {
-                    invalid = None;
-                    let now = Instant::now();
-                    if let Some(value) = project(&frame) {
-                        if stable.observe(value, now, quiet) {
-                            self.last_frame = frame.frame;
-                            return Ok(frame);
-                        }
-                    } else {
-                        stable.break_streak();
-                    }
+            self.refill()?;
+            let mut newest = None;
+            while let Some(frame) = self.take_next()? {
+                if let Some(value) = project(&frame) {
+                    let _stable = stable.observe(value, Instant::now(), quiet);
+                } else {
+                    stable.break_streak();
                 }
-                Err(Error::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {}
-                Err(err @ Error::Probe { .. }) => invalid = Some(err),
-                Err(err) => return Err(err),
+                newest = Some(frame);
+            }
+            let frame = match newest {
+                Some(frame) => Some(frame),
+                None => self.current()?,
+            };
+            if let Some(frame) = frame {
+                if let Some(value) = project(&frame) {
+                    if stable.observe(value, Instant::now(), quiet) {
+                        return Ok(frame);
+                    }
+                } else {
+                    stable.break_streak();
+                }
             }
             if Instant::now() >= deadline {
-                return Err(invalid.unwrap_or(Error::Timeout {
+                return Err(Error::Timeout {
                     waiting: description,
                     timeout,
-                }));
+                });
             }
-            thread::sleep(Duration::from_millis(12));
+            thread::sleep(Duration::from_millis(8));
         }
     }
 
-    /// Wait for a fresh semantic result and enforce its production latency.
+    /// Await a post-trigger semantic cue and enforce its product timestamp.
     ///
-    /// The end timestamp was captured inside the application before witness
-    /// serialization. Reader polling and filesystem latency are excluded.
+    /// Eligibility proves temporal ordering, not causation. The witness is a
+    /// synchronization surface; a user-valued story claim still needs an
+    /// external rendered or durable oracle.
     pub fn wait_budgeted(
         &mut self,
         app: &Application<'_>,
         receipt: &ActionReceipt,
-        budget: PerformanceBudget,
+        budget: ReactionBudget,
         description: impl Into<String>,
         mut predicate: impl FnMut(&ProbeFrame<S>) -> bool,
     ) -> Result<Timed<ProbeFrame<S>>> {
@@ -326,66 +317,21 @@ impl<S: DeserializeOwned> Probe<S> {
         &mut self,
         app: &Application<'_>,
         receipt: &ActionReceipt,
-        budget: PerformanceBudget,
+        budget: ReactionBudget,
         description: impl Into<String>,
         mut predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
     ) -> Result<Timed<ProbeFrame<S>>> {
         let description = description.into();
-        if self.journal.is_some() {
-            return self.wait_budgeted_journal(app, receipt, budget, description, predicate);
-        }
-        let prior = self.last_frame;
-        let endpoint = budget.endpoint();
-        let frame = self.wait_checked(
-            app,
-            budget.functional_timeout(),
-            description.clone(),
-            |frame| {
-                if frame.frame <= prior {
-                    return Err(format!(
-                        "frame {} is not newer than prior frame {prior}",
-                        frame.frame
-                    ));
-                }
-                if frame.begun_ns < receipt.triggered_ns() {
-                    return Err(format!(
-                        "frame began at {} before input trigger {}",
-                        frame.begun_ns,
-                        receipt.triggered_ns()
-                    ));
-                }
-                let timestamp = endpoint.timestamp(frame);
-                if timestamp < receipt.triggered_ns() {
-                    return Err(format!(
-                        "{endpoint:?} timestamp {timestamp} predates input trigger {}",
-                        receipt.triggered_ns()
-                    ));
-                }
-                predicate(frame)
-            },
-        )?;
-        budget.adjudicate(description, receipt, endpoint.timestamp(&frame), frame)
-    }
-
-    fn wait_budgeted_journal(
-        &mut self,
-        app: &Application<'_>,
-        receipt: &ActionReceipt,
-        budget: PerformanceBudget,
-        description: String,
-        mut predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
-    ) -> Result<Timed<ProbeFrame<S>>> {
-        let prior = self.last_frame;
+        let prior = self.cursor.surface_sequence;
         let endpoint = budget.endpoint();
         let timeout = budget.functional_timeout();
         let deadline = Instant::now() + timeout;
         let mut last_mismatch = None;
         loop {
             app.ensure_running(&description)?;
-            self.refill_journal()?;
-            while let Some(frame) = self.journal_queue.pop_front() {
-                self.validate(&frame)?;
-                if frame.frame <= prior || frame.begun_ns < receipt.triggered_ns() {
+            self.refill()?;
+            while let Some(frame) = self.take_next()? {
+                if frame.surface_sequence <= prior || frame.begun_ns < receipt.triggered_ns() {
                     continue;
                 }
                 let timestamp = endpoint.timestamp(&frame);
@@ -394,7 +340,6 @@ impl<S: DeserializeOwned> Probe<S> {
                 }
                 match predicate(&frame) {
                     Ok(()) => {
-                        self.last_frame = frame.frame;
                         return budget.adjudicate(description, receipt, timestamp, frame);
                     }
                     Err(mismatch) => last_mismatch = Some(mismatch),
@@ -417,13 +362,10 @@ impl<S: DeserializeOwned> Probe<S> {
         }
     }
 
-    fn refill_journal(&mut self) -> Result<()> {
-        let Some(journal) = &mut self.journal else {
-            return Ok(());
-        };
-        match journal.read_new::<ProbeFrame<S>>() {
-            Ok(frames) => {
-                self.journal_queue.extend(frames);
+    fn refill(&mut self) -> Result<()> {
+        match self.journal.read_new_bytes() {
+            Ok(records) => {
+                self.pending.extend(records);
                 Ok(())
             }
             Err(egui_tester_witness::Error::Io { source, .. })
@@ -441,55 +383,78 @@ impl<S: DeserializeOwned> Probe<S> {
                 source,
             }),
             Err(error) => Err(Error::Probe {
-                path: journal.path().to_owned(),
+                path: self.path.clone(),
                 detail: error.to_string(),
             }),
         }
     }
 
-    fn validate(&self, frame: &ProbeFrame<S>) -> Result<()> {
-        if let Some(expected) = &self.expected_launch {
-            if frame.schema != egui_tester_witness::SCHEMA {
-                return self.invalid(format!(
-                    "expected schema {}, found {}",
-                    egui_tester_witness::SCHEMA,
-                    frame.schema
-                ));
-            }
-            if &frame.launch != expected {
-                return self.invalid(format!(
-                    "launch nonce mismatch: expected `{expected}`, found `{}`",
-                    frame.launch
-                ));
-            }
-            if frame.begun_ns == 0
-                || frame.observed_ns == 0
-                || frame.presented_ns == 0
-                || frame.presentation == 0
-            {
-                return self.invalid(
-                    "sealed witness omitted begin, observation, or presentation timestamp"
-                        .to_owned(),
-                );
-            }
-            if frame.observed_ns < frame.begun_ns || frame.presented_ns < frame.observed_ns {
-                return self.invalid("sealed witness timestamps are not monotonic".to_owned());
-            }
+    fn take_next(&mut self) -> Result<Option<ProbeFrame<S>>> {
+        let Some(bytes) = self.pending.pop_front() else {
+            return Ok(None);
+        };
+        let frame = self.decode(&bytes)?;
+        if self.current.is_some()
+            && (frame.surface_sequence <= self.cursor.surface_sequence
+                || frame.frame < self.cursor.frame
+                || frame.begun_ns < self.cursor.begun_ns)
+        {
+            return self.invalid("sealed witness observation order regressed".to_owned());
         }
-        if frame.ppp.is_some_and(|ppp| !ppp.is_finite() || ppp <= 0.0) {
+        self.cursor = ProbeCursor {
+            frame: frame.frame,
+            surface_sequence: frame.surface_sequence,
+            begun_ns: frame.begun_ns,
+        };
+        self.current = Some(bytes);
+        Ok(Some(frame))
+    }
+
+    fn current(&self) -> Result<Option<ProbeFrame<S>>> {
+        self.current
+            .as_deref()
+            .map(|bytes| self.decode(bytes))
+            .transpose()
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<ProbeFrame<S>> {
+        let frame = serde_json::from_slice(bytes).map_err(|error| Error::Probe {
+            path: self.path.clone(),
+            detail: error.to_string(),
+        })?;
+        self.validate(&frame)?;
+        Ok(frame)
+    }
+
+    fn validate(&self, frame: &ProbeFrame<S>) -> Result<()> {
+        if frame.schema != egui_tester_witness::SCHEMA {
+            return self.invalid(format!(
+                "expected schema {}, found {}",
+                egui_tester_witness::SCHEMA,
+                frame.schema
+            ));
+        }
+        if frame.launch != self.launch {
+            return self.invalid(format!(
+                "launch nonce mismatch: expected `{}`, found `{}`",
+                self.launch, frame.launch
+            ));
+        }
+        if frame.frame == 0
+            || frame.begun_ns == 0
+            || frame.observed_ns == 0
+            || frame.surface_presented_ns == 0
+            || frame.surface_sequence == 0
+        {
+            return self.invalid("sealed witness omitted a required frame field".to_owned());
+        }
+        if frame.observed_ns < frame.begun_ns || frame.surface_presented_ns < frame.observed_ns {
+            return self.invalid("sealed witness timestamps are not monotonic".to_owned());
+        }
+        if !frame.ppp.is_finite() || frame.ppp <= 0.0 {
             return self.invalid("pixels per point must be positive and finite".to_owned());
         }
-        let mut names = BTreeSet::new();
-        for anchor in &frame.anchors {
-            anchor.validate().map_err(|err| Error::Probe {
-                path: self.path.clone(),
-                detail: err.to_string(),
-            })?;
-            if !names.insert(&anchor.name) {
-                return self.invalid(format!("duplicate anchor `{}`", anchor.name));
-            }
-        }
-        Ok(())
+        validate_anchors(&self.path, &frame.anchors)
     }
 
     fn invalid<T>(&self, detail: String) -> Result<T> {
@@ -500,22 +465,177 @@ impl<S: DeserializeOwned> Probe<S> {
     }
 }
 
+/// One weak, product-specific atomic JSON snapshot.
+///
+/// This exists only to migrate applications that predate the sealed protocol.
+#[derive(Clone, Debug, Deserialize)]
+pub struct LegacyProbeFrame<S = Value> {
+    #[serde(default)]
+    pub schema: u32,
+    #[serde(default)]
+    pub launch: String,
+    pub frame: u64,
+    #[serde(default)]
+    pub ppp: Option<f32>,
+    pub anchors: Vec<Anchor>,
+    pub state: S,
+}
+
+impl<S> LegacyProbeFrame<S> {
+    #[must_use]
+    pub fn anchor(&self, name: &str) -> Option<&Anchor> {
+        self.anchors.iter().find(|anchor| anchor.name == name)
+    }
+}
+
+/// Explicit reader for an unsealed product-owned atomic JSON snapshot.
+#[derive(Debug)]
+pub struct LegacyProbe<S = Value> {
+    path: PathBuf,
+    last_frame: u64,
+    state: PhantomData<fn() -> S>,
+}
+
+pub type LegacyJsonProbe = LegacyProbe<Value>;
+
+impl LegacyProbe<Value> {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            last_frame: 0,
+            state: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn typed<T>(self) -> LegacyProbe<T> {
+        LegacyProbe {
+            path: self.path,
+            last_frame: self.last_frame,
+            state: PhantomData,
+        }
+    }
+}
+
+impl<S: DeserializeOwned> LegacyProbe<S> {
+    pub fn read(&self) -> Result<LegacyProbeFrame<S>> {
+        let bytes =
+            std::fs::read(&self.path).map_err(|error| io("read witness", &self.path, error))?;
+        let frame = serde_json::from_slice::<LegacyProbeFrame<S>>(&bytes).map_err(|error| {
+            Error::Probe {
+                path: self.path.clone(),
+                detail: error.to_string(),
+            }
+        })?;
+        if frame.ppp.is_some_and(|ppp| !ppp.is_finite() || ppp <= 0.0) {
+            return Err(Error::Probe {
+                path: self.path.clone(),
+                detail: "pixels per point must be positive and finite".to_owned(),
+            });
+        }
+        validate_anchors(&self.path, &frame.anchors)?;
+        Ok(frame)
+    }
+
+    pub fn wait(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+        description: impl Into<String>,
+        mut predicate: impl FnMut(&LegacyProbeFrame<S>) -> bool,
+    ) -> Result<LegacyProbeFrame<S>> {
+        let description = description.into();
+        let deadline = Instant::now() + timeout;
+        let mut invalid = None;
+        loop {
+            app.ensure_running(&description)?;
+            match self.read() {
+                Ok(frame) => {
+                    invalid = None;
+                    if predicate(&frame) {
+                        self.last_frame = frame.frame;
+                        return Ok(frame);
+                    }
+                }
+                Err(Error::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {}
+                Err(error @ Error::Probe { .. }) => invalid = Some(error),
+                Err(error) => return Err(error),
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid.unwrap_or(Error::Timeout {
+                    waiting: description,
+                    timeout,
+                }));
+            }
+            thread::sleep(Duration::from_millis(12));
+        }
+    }
+
+    pub fn wait_anchor(
+        &mut self,
+        app: &Application<'_>,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<Anchor> {
+        let frame = self.wait(app, timeout, format!("legacy anchor `{name}`"), |frame| {
+            frame.anchor(name).is_some()
+        })?;
+        frame.anchor(name).cloned().ok_or_else(|| Error::Probe {
+            path: self.path.clone(),
+            detail: format!("anchor `{name}` vanished from the matching frame"),
+        })
+    }
+
+    pub fn wait_fresh(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+    ) -> Result<LegacyProbeFrame<S>> {
+        let prior = self.last_frame;
+        self.wait(
+            app,
+            timeout,
+            format!("legacy witness frame newer than {prior}"),
+            |frame| frame.frame > prior,
+        )
+    }
+}
+
+fn validate_anchors(path: &Path, anchors: &[Anchor]) -> Result<()> {
+    let mut names = BTreeSet::new();
+    for anchor in anchors {
+        anchor.validate().map_err(|error| Error::Probe {
+            path: path.to_owned(),
+            detail: error.to_string(),
+        })?;
+        if !names.insert(&anchor.name) {
+            return Err(Error::Probe {
+                path: path.to_owned(),
+                detail: format!("duplicate anchor `{}`", anchor.name),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn duplicate_anchors_are_not_ambiguous() {
-        let probe = JsonProbe::new("/unread");
+        let probe = Probe::sealed("/unread", "launch");
         let frame = ProbeFrame {
-            schema: 0,
-            launch: String::new(),
+            schema: egui_tester_witness::SCHEMA,
+            launch: "launch".to_owned(),
             frame: 1,
-            begun_ns: 0,
-            observed_ns: 0,
-            presented_ns: 0,
-            presentation: 0,
-            ppp: Some(1.0),
+            begun_ns: 1,
+            observed_ns: 2,
+            surface_presented_ns: 3,
+            surface_sequence: 1,
+            ppp: 1.0,
             anchors: vec![
                 Anchor::physical("same", [0.0, 0.0, 1.0, 1.0]).expect("first"),
                 Anchor::physical("same", [1.0, 1.0, 2.0, 2.0]).expect("second"),
@@ -545,5 +665,51 @@ mod tests {
             epoch + Duration::from_millis(110),
             Duration::from_millis(50)
         ));
+    }
+
+    #[test]
+    fn sealed_observations_are_ordered_by_surface_sequence() {
+        let mut probe: Probe<Value> = Probe::sealed("/unread", "launch");
+        probe.pending.extend([
+            wire_frame(7, 1, 10),
+            wire_frame(7, 2, 20),
+            wire_frame(8, 1, 30),
+        ]);
+        assert_eq!(
+            probe
+                .take_next()
+                .expect("first observation")
+                .expect("first frame")
+                .surface_sequence,
+            1
+        );
+        assert_eq!(
+            probe
+                .take_next()
+                .expect("same product frame may be presented again")
+                .expect("second frame")
+                .surface_sequence,
+            2
+        );
+        assert!(
+            probe.take_next().is_err(),
+            "surface identity regression was admitted"
+        );
+    }
+
+    fn wire_frame(frame: u64, surface_sequence: u64, begun_ns: u64) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "schema": egui_tester_witness::SCHEMA,
+            "launch": "launch",
+            "frame": frame,
+            "begun_ns": begun_ns,
+            "observed_ns": begun_ns + 1,
+            "surface_presented_ns": begun_ns + 2,
+            "surface_sequence": surface_sequence,
+            "ppp": 1.0,
+            "anchors": [],
+            "state": null
+        }))
+        .expect("encode witness fixture")
     }
 }

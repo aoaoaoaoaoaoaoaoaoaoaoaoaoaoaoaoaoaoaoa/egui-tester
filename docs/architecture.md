@@ -2,42 +2,45 @@
 
 ## Names
 
-**Testbed** is the owned universe: display or compositor, private filesystem,
-and teardown boundary.
+**Testbed** is the owned universe: display, private filesystem, process
+boundary, and teardown.
 
-**Application** is one transient systemd service inside a testbed.
+**Application** is one transient service and its complete descendant cgroup.
 
-**Witness** is one-way application telemetry used for targeting and
+**Witness** is one-way product telemetry used for targeting and
 synchronization.
 
-**Oracle** is product evidence used for a verdict.
+**Oracle** is external product evidence used for a verdict.
 
-**Borrow** is a live host path deliberately revealed read-only. A borrow never
-means a writable mount, overlay, or redirection.
+**Borrow** is a live host path deliberately exposed read-only. It never means a
+writable mount, overlay, or redirection.
 
-These terms should not be used interchangeably. In particular, application
-state is not an oracle merely because it is convenient to serialize.
+**Surface present** means return from the graphics API's present operation. It
+does not mean compositor scanout or physical display completion.
 
-## Boundary
-
-The harness sits outside the application and controls the operating-system
-boundary:
+## Trust Boundary
 
 ```text
-test process
-  ├─ Xvfb or Weston
-  ├─ systemd transient application cgroup
+acceptance process
+  ├─ authenticated private Xvfb
+  ├─ transient systemd user service
   │    └─ bubblewrap
-  │         └─ real application executable
-  ├─ XTEST / Weston output capture
-  └─ witness reader and oracle adjudicator
+  │         └─ optimized product executable
+  ├─ XTEST input and X11 pixel capture
+  ├─ sealed witness readers
+  └─ external oracle adjudicator
 ```
 
-The application receives native input from its display server. The pixels
-cross the real winit, egui, tessellation, renderer, surface, and display path.
-The harness does not call application methods or mutate application state.
+The application receives ordinary display-server input. Pixels cross its real
+winit, egui, renderer, surface, and X server path. The harness never calls
+product methods or exposes a mutation channel.
 
-## Filesystem Authority
+The harness uses the canonical `/run/user/<uid>/bus` only to govern transient
+services. It ignores inherited desktop `DISPLAY`, session-bus, and XDG-runtime
+values. The application receives neither that bus nor any live desktop
+authority.
+
+## Authority
 
 The default guest mount graph is allowlisted:
 
@@ -46,118 +49,110 @@ The default guest mount graph is allowlisted:
 | `/usr`, `/etc` | read-only runtime |
 | `/app/application` | read-only executable |
 | `/test` | writable, private, disposable |
-| `/dev` | synthetic under software graphics |
+| `/dev` | synthetic |
 | `/proc`, `/run` | private namespace instances |
 | declared borrows | read-only at the same absolute path |
 
-Systemd independently marks the host system read-only and grants write access
-only to the harness-created session root needed as bubblewrap's backing store.
-The app sees that store solely as `/test`. On normal failure and panic,
-systemd kills the complete cgroup before the testbed removes the store.
+Systemd independently enforces a read-only host, a runtime limit,
+`NoNewPrivileges`, control-group termination, and network denial. Bubblewrap
+adds process, mount, IPC, UTS, and normally network namespaces. Software
+graphics sees only lavapipe. Host graphics adds discovered DRM, KFD, or NVIDIA
+character devices and read-only sysfs.
 
-The kernel returns `EROFS` or `EACCES` for writes through a borrow. The harness
-retains stderr and exit facts. An application that deliberately swallows an
-I/O error remains responsible for exposing the resulting product failure; a
-future syscall-audit mode may make attempted denied writes independently
-observable.
+The harness validates every environment override and reserves display,
+filesystem, loader, graphics, and witness authority variables. Private oracle
+reads, writes, and exports are rooted capability operations using
+`openat2(BENEATH | NO_MAGICLINKS | NO_SYMLINKS)`. Failure-bundle traversal also
+refuses symlinks.
+
+`Application::terminate` marks a service retired only after a successful
+cgroup stop. Drop retries teardown if an explicit stop failed. No scenario may
+fall back to an ambient process merely because containment is unavailable.
+
+## Observation
+
+The standard semantic surface is one launch-sealed append-only journal. Each
+length-framed record contains:
+
+- schema and launch identity;
+- product frame and surface sequence;
+- frame-begin, observation, and surface-present monotonic timestamps;
+- physical scale and target rectangles;
+- deliberately selected product state.
+
+There is no atomic latest-state twin. `Probe<S>` incrementally consumes all
+complete records and retains the newest locally; incomplete live tails wait for
+their remainder. Required envelope fields cannot silently default.
+
+The fixed-width frame journal carries the same frame identity and timestamps
+for low-cost cadence analysis. One asynchronous publisher owns both files.
+The UI thread projects state and anchors, captures the observation timestamp,
+renders, calls surface present, then enqueues the owned record. Serialization
+and filesystem writes occur on a private worker. Shutdown flushes the queue and
+surfaces writer faults.
+
+Legacy single-JSON and weak journal readers are explicitly named
+`LegacyJsonProbe` and `LegacyProbe`. They exist only for migration and do not
+inherit standard-witness guarantees.
 
 ## Synchronization
 
-Every wait has a deadline and continuously checks application liveness.
-Polling intervals are implementation detail, not choreography. The caller
-states a predicate:
+Every wait is predicate-driven, bounded, and liveness-aware. Polling intervals
+are implementation detail, never choreography. A caller may await:
 
-- a window exists and is viewable
-- an anchor or semantic value exists in a fresh witness frame
-- a private product file contains a committed value
-- enough pixels differ from a baseline
-- sufficiently few pixels differ for N consecutive samples
+- a uniquely selected viewable window;
+- a target or state predicate in a complete observation;
+- projection stability for a declared quiet interval;
+- a private durable effect;
+- changed pixels in a named region;
+- bounded pixel quiescence.
 
-The standard witness is published only after its product frame is presented.
-Its semantic state and anchors must describe one coherent egui pass. A
-pass plugin clears anchors before every egui pass, including replacement passes
-requested through `Context::request_discard`. A transition predicate should
-still require both the new state and a control that belongs to that state.
+A `Reaction` considers only frames newer than its prior cursor and with product
+timestamps after the gesture trigger. This is temporal eligibility, not proof
+of causation. The resulting frame is a synchronization fence for a subsequent
+pixel or external oracle.
 
-The atomically replaced JSON file is the latest-state surface. The publisher
-also appends the identical serialized frame to a launch-sealed, length-framed
-observation journal. Budgeted Reactions consume complete records in
-presentation order and select the earliest causal match. Thus a valid
-intermediate state cannot be overwritten between harness polls; incomplete
-live tails are retained for the next read rather than treated as corruption.
+Structural layout changes should request an egui discard pass. Application
+instrumentation must clear targets at every pass and publish only the
+replacement pass that was actually submitted.
 
-A witness transition still must not substitute for a product verdict. It may
-release a subsequent pixel or external-oracle wait.
+## Timing
 
-## Performance
+An `ActionReceipt` records gesture start, the final input capable of satisfying
+the postcondition, and injection completion in `CLOCK_MONOTONIC`. Reaction
+latency begins at the trigger, excluding deliberate pointer transport and
+wheel pacing.
 
-Every native input operation may return an `ActionReceipt` with three
-`CLOCK_MONOTONIC` instants: gesture start, the final input that can satisfy its
-postcondition, and injection completion. A reaction budget begins at the
-trigger; a cadence trace spans the gesture. Deliberate pointer transport and
-wheel pacing therefore enter cadence evidence without taxing product reaction
-latency.
+`ReactionBudget::functional(timeout)` bounds progress but makes no performance
+claim. `ReactionBudget::performance(limit)` additionally rejects a matching
+product timestamp beyond `limit`; its larger timeout cannot dilute that
+threshold. Observation is the default endpoint.
+`through_surface_present()` extends it through graphics surface submission,
+not scanout.
 
-A standard witness and its lossless frame journal carry four timestamps from
-the same epoch:
+`FrameProbe::trace` isolates frames begun during a sustained gesture.
+`CadenceBudget` may constrain minimum samples, p50, p95, worst cadence, and p95
+product frame work. Reports use raw UI-thread timestamps. Instrumentation runs
+off-thread, so no guessed correction is applied.
 
-1. `begun_ns`, captured at product frame entry;
-2. `observed_ns`, captured after product-state work;
-3. `presented_ns`, captured immediately after the corresponding real frame is
-   presented;
-4. `retired_ns`, captured after post-present witness publication.
+Functional stories use `Graphics::Software` for deterministic behavior.
+Production reaction and cadence contracts use `Graphics::Host` on a
+representative machine. Both run optimized product code. An “instrumented build
+multiplier” is inadmissible.
 
-The adapter collects anchors, constructs test-only state, serializes JSON, and
-atomically publishes only after presentation. Harness polling,
-screenshots, and filesystem latency are therefore outside both verdicts.
-`PerformanceBudget` defaults to observation and may opt into presentation.
-Its functional timeout bounds a missing result but never dilates the
-production threshold.
+## Platform Frontier
 
-`FrameProbe::trace` does not mistake an in-flight presentation for a
-post-gesture frame: its causal fence requires a frame begun after action
-completion. `CadenceBudget` subtracts each preceding frame’s
-`presented_ns..retired_ns` witness tax before computing p50, p95, and worst
-cadence; p95 frame work remains the unadjusted
-`begun_ns..presented_ns` product interval.
+X11 is the sole complete backend. Headless Weston proves only isolated launch
+and output capture. Native Wayland input requires compositor authority, likely
+a test protocol or plugin; AccessKit actions would bypass the pointer and
+keyboard boundary. That expansion remains parked.
 
-The semantic observation journal is distinct from the low-tax cadence journal.
-The former is richer and read only while synchronizing Reactions; the latter
-is fixed-width and supplies sustained frame distributions.
+AccessKit is instead the likely replacement for hand-authored target rectangles
+where its stable author IDs, roles, names, values, focus, and bounds suffice.
+Product-specific observations will remain for facts an accessibility tree
+cannot express.
 
-Run performance acceptance against an optimized product binary. Software
-graphics is a conservative presentation environment; use
-`Graphics::Host` only when the question specifically requires representative
-GPU timing. Never invent an “instrumented build multiplier.”
-
-## Wayland
-
-Headless Weston supplies a real Wayland socket and pixman output without
-changing the operator's desktop session. Output capture is already a real
-compositor observation.
-
-Input remains a named gap. Wayland gives input authority to the compositor,
-not arbitrary clients. A future implementation would require a Weston test
-plugin or another compositor test protocol that synthesizes seat events before
-normal dispatch. AccessKit actions are unsuitable as the primary E2E input
-path because they bypass pointer and keyboard handling. This work is
-deliberately deferred: X11 is the sole release-tested vertical until its full
-architecture survives another product adoption.
-
-## Future Surfaces
-
-The next reusable seam should replace app-specific anchor JSON with a one-way
-AccessKit/frame-presented stream. Stable author IDs locate widgets; the
-standard accessibility tree carries role, name, value, focus, and bounds.
-Booru's current adapter can then contract to application-specific predicates
-that AccessKit cannot express.
-
-An optional MCP should wrap the Rust controller, not enter the application.
-Useful tools are `launch`, `inspect`, `click`, `type`, `wait`, `capture`, and
-`artifacts`. Every response should include epoch and evidence paths so a model
-cannot confuse stale telemetry with the last input.
-
-Demo recording should reuse a serializable action and selector IR while
-retaining separate timing policy. Tests optimize for predicate-driven speed;
-videos add deliberate cursor motion, dwell, and capture cadence. The oracle
-and containment machinery is shared, not the sleeps.
+Other named gaps are multi-window and native-dialog choreography, tray
+surfaces, window move/resize, clipboard and IME input, text beyond Latin-1, and
+a serializable action timeline for recording. A product must park a dependent
+story rather than smuggle xdotool or ambient desktop authority back in.

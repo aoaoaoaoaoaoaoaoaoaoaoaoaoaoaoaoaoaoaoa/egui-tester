@@ -2,21 +2,23 @@ use std::time::Duration;
 
 use crate::{Error, ProbeFrame, Result};
 
-/// Product endpoint adjudicated by a performance budget.
+/// Product timestamp used to complete one reaction.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum PerformanceEndpoint {
+pub enum ReactionEndpoint {
     /// Native input through completed product-state work, before telemetry.
     #[default]
     Observation,
-    /// Native input through presentation of the corresponding product frame.
-    Presentation,
+    /// Native input through `wgpu` surface present submission.
+    ///
+    /// This is not a compositor scanout or physical-display completion proof.
+    SurfacePresent,
 }
 
-impl PerformanceEndpoint {
+impl ReactionEndpoint {
     pub(crate) const fn timestamp<S>(self, frame: &ProbeFrame<S>) -> u64 {
         match self {
             Self::Observation => frame.observed_ns,
-            Self::Presentation => frame.presented_ns,
+            Self::SurfacePresent => frame.surface_presented_ns,
         }
     }
 }
@@ -83,34 +85,46 @@ impl ActionReceipt {
     }
 }
 
-/// Production responsiveness contract plus a larger functional deadline.
+/// Deadline for one reaction, optionally carrying a production latency limit.
 ///
-/// Observation budgets end before witness work. Presentation budgets end at
-/// the corresponding real product frame. Harness polling and witness I/O
-/// cannot consume either. `timeout` only bounds a missing result; it never
-/// dilates the production budget.
+/// A functional budget bounds a missing cue without making a performance
+/// claim. A performance budget additionally rejects reactions whose product
+/// timestamp breaches `production`. Observation ends before witness work;
+/// surface-present ends after the corresponding `wgpu` present call. Harness
+/// polling and witness I/O consume neither.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PerformanceBudget {
-    production: Duration,
+pub struct ReactionBudget {
+    production: Option<Duration>,
     timeout: Duration,
-    endpoint: PerformanceEndpoint,
+    endpoint: ReactionEndpoint,
 }
 
-impl PerformanceBudget {
+impl ReactionBudget {
+    /// Bound functional progress without adjudicating production latency.
     #[must_use]
-    pub fn new(production: Duration) -> Self {
-        let timeout = production.saturating_mul(10).max(Duration::from_secs(2));
+    pub const fn functional(timeout: Duration) -> Self {
         Self {
-            production,
+            production: None,
             timeout,
-            endpoint: PerformanceEndpoint::Observation,
+            endpoint: ReactionEndpoint::Observation,
         }
     }
 
-    /// Judge the complete user-visible frame rather than semantic work alone.
+    /// Adjudicate production latency, with a larger missing-cue deadline.
     #[must_use]
-    pub const fn through_presentation(mut self) -> Self {
-        self.endpoint = PerformanceEndpoint::Presentation;
+    pub fn performance(production: Duration) -> Self {
+        let timeout = production.saturating_mul(10).max(Duration::from_secs(2));
+        Self {
+            production: Some(production),
+            timeout,
+            endpoint: ReactionEndpoint::Observation,
+        }
+    }
+
+    /// Judge through `wgpu` surface present submission.
+    #[must_use]
+    pub const fn through_surface_present(mut self) -> Self {
+        self.endpoint = ReactionEndpoint::SurfacePresent;
         self
     }
 
@@ -121,7 +135,7 @@ impl PerformanceBudget {
     }
 
     #[must_use]
-    pub const fn production(self) -> Duration {
+    pub const fn production(self) -> Option<Duration> {
         self.production
     }
 
@@ -131,7 +145,7 @@ impl PerformanceBudget {
     }
 
     #[must_use]
-    pub const fn endpoint(self) -> PerformanceEndpoint {
+    pub const fn endpoint(self) -> ReactionEndpoint {
         self.endpoint
     }
 
@@ -153,10 +167,12 @@ impl PerformanceBudget {
                 ),
             })?;
         let elapsed = Duration::from_nanos(elapsed_ns);
-        if elapsed > self.production {
+        if let Some(production) = self.production
+            && elapsed > production
+        {
             return Err(Error::TooSlow {
                 operation,
-                budget: self.production,
+                budget: production,
                 elapsed,
             });
         }
@@ -193,9 +209,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn functional_deadline_does_not_adjudicate_latency() {
+        let budget = ReactionBudget::functional(Duration::from_secs(30));
+        let receipt = ActionReceipt::for_test(1_000_000, 1_000_000, 1_000_000);
+        let reaction = budget
+            .adjudicate("repaint", &receipt, 22_000_001, ())
+            .expect("functional deadline must not claim a production regression");
+        assert_eq!(reaction.elapsed(), Duration::from_nanos(21_000_001));
+    }
+
+    #[test]
     fn functional_timeout_never_dilates_the_production_budget() {
         let budget =
-            PerformanceBudget::new(Duration::from_millis(20)).timeout(Duration::from_secs(30));
+            ReactionBudget::performance(Duration::from_millis(20)).timeout(Duration::from_secs(30));
         let receipt = ActionReceipt::for_test(1_000_000, 1_000_000, 1_000_000);
         let error = budget
             .adjudicate("repaint", &receipt, 22_000_001, ())

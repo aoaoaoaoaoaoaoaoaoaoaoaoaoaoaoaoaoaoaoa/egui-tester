@@ -7,7 +7,7 @@ use std::{
 };
 
 use egui_tester::{
-    AppCommand, Backend, Button, Error, JsonProbe, Quiet, Result, Testbed, TestbedBuilder,
+    AppCommand, Backend, Button, Error, LegacyJsonProbe, Quiet, Result, Testbed, TestbedBuilder,
     X11Config,
 };
 
@@ -26,7 +26,6 @@ fn main() -> Result<()> {
     let testbed = builder.raise()?;
     seed_demo(&testbed, Path::new(&booru_root))?;
     let probe_path = testbed.private_path("probes/booru.json")?;
-    let slate_path = testbed.private_path(format!("xdg/state/{APP}/slate.toml"))?;
     let command = AppCommand::new(binary)
         .private_env("ABV_ANCHOR_PROBE", "probes/booru.json")
         .private_env("ADEQUATE_BOORU_VIEWER_STARTUP_PROBE", "probes/booru-ready")
@@ -36,7 +35,7 @@ fn main() -> Result<()> {
     let x11 = testbed.x11()?;
     let window = x11.wait_window(&app, TITLE, Duration::from_secs(20))?;
     x11.focus(&window)?;
-    let mut probe = JsonProbe::new(&probe_path);
+    let mut probe = LegacyJsonProbe::new(&probe_path);
     let recess = probe.wait_anchor(&app, "recess:ui", Duration::from_secs(10))?;
     let closed = x11.wait_quiet(&app, &window, Quiet::default())?;
     let (x, y) = recess.center();
@@ -71,7 +70,11 @@ fn main() -> Result<()> {
     app.wait_until(
         Duration::from_secs(5),
         "wet mode to reach the persisted slate",
-        || Ok(fs::read_to_string(&slate_path).is_ok_and(|text| text.contains("water = \"wet\""))),
+        || {
+            Ok(testbed
+                .read_private_to_string(format!("xdg/state/{APP}/slate.toml"))
+                .is_ok_and(|text| text.contains("water = \"wet\"")))
+        },
     )?;
     app.terminate()?;
     drop(app);
@@ -80,7 +83,7 @@ fn main() -> Result<()> {
     let restarted = testbed.launch(command)?;
     let window = x11.wait_window(&restarted, TITLE, Duration::from_secs(20))?;
     x11.focus(&window)?;
-    let mut probe = JsonProbe::new(&probe_path);
+    let mut probe = LegacyJsonProbe::new(&probe_path);
     let restored = probe.wait(
         &restarted,
         Duration::from_secs(10),
@@ -125,7 +128,7 @@ fn seed_demo(testbed: &Testbed, booru_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn state_is(frame: &egui_tester::ProbeFrame, key: &str, expected: &str) -> bool {
+fn state_is(frame: &egui_tester::LegacyProbeFrame, key: &str, expected: &str) -> bool {
     frame.state[key]
         .as_str()
         .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))

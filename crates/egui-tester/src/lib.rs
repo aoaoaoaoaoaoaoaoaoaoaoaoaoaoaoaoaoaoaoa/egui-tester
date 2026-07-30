@@ -16,15 +16,15 @@ mod testbed;
 mod timing;
 mod x11;
 
-pub use condition::{Condition, Field, field, state};
+pub use condition::{Condition, Field, field};
 pub use error::{Error, Result};
 pub use frames::{CadenceBudget, CadenceReport, FrameProbe, FrameSample, FrameTrace};
-pub use pixels::{Frame, Quiet};
-pub use probe::{Anchor, JsonProbe, Probe, ProbeFrame};
+pub use pixels::{Frame, PixelRegion, Quiet};
+pub use probe::{Anchor, LegacyJsonProbe, LegacyProbe, LegacyProbeFrame, Probe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
-pub use story::{Reaction, Story, Target, demand};
+pub use story::{Reaction, Story, demand};
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
-pub use timing::{ActionReceipt, PerformanceBudget, PerformanceEndpoint, Timed};
+pub use timing::{ActionReceipt, ReactionBudget, ReactionEndpoint, Timed};
 pub use x11::{
     Button, Drag, Key, Modifiers, Stroke, Wheel, Window, WindowQuery, X11Controller, X11Session,
 };

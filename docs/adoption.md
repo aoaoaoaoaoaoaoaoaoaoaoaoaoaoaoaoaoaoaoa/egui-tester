@@ -1,171 +1,152 @@
 # Application Adoption
 
-## Durable Shape
+## Repository Shape
 
 Each product owns a thin, unpublished `<product>-acceptance` executable. It
-depends on `egui-tester`, not on product crates. Its only product knowledge is
-fixture seeding, witness predicates, performance budgets, and real oracles.
-Containment, display input, synchronization, timing, transcripts, and failure
-artifacts remain library responsibilities.
-
-The executable defines an acceptance-owned, deliberately partial
-`Deserialize` Observation and drives the product through `Story<Observation>`.
-Stable product Targets should live in a dependency-free product contract crate
-shared with the GUI. Implementing `AsRef<str>` admits them directly to the
-tester without making that contract depend on `egui-tester`.
-
-The product exposes an `egui-test` feature that adds
-`egui-tester-witness`. This feature is telemetry, never a control plane. The
-acceptance executable must still launch the real optimized product binary and
-drive native input.
-
-A conventional repository provides:
+depends on `egui-tester` and a small product contract crate, never the GUI or
+domain implementation. Product knowledge is limited to fixture seeding,
+semantic predicates, budgets, and external oracles.
 
 ```text
-crates/<product>-acceptance/
-  src/stories/
+crates/
+  <product>-contract/
+  <product>-acceptance/
+    src/stories/
 scripts/test-gui
 ```
 
-`scripts/test-gui` builds the product in release mode with `egui-test`, then
-runs the acceptance executable. The acceptance executable derives the sibling
-product binary by default, accepts an artifact directory, and uses
-`TestbedBuilder::failure_artifacts`.
+The contract crate owns stable product vocabulary shared by GUI and
+acceptance: application identity, schema fingerprint, Target names, and any
+small enums that cross the observation wire. A Target need only implement
+`Display`; the contract remains independent of the tester. Handwritten Rust is
+the present source of truth. Derives or a shared contract-language crate should
+appear only after a second product reveals repeated syntax.
+
+Acceptance defines a deliberately partial `Deserialize` observation. It may
+reuse contract enums but should not depend on the GUI's witness struct or
+mirror the product model wholesale.
+
+## Build Classes
+
+The product exposes an `egui-test` feature that adds only
+`egui-tester-witness`. This feature must not change defaults, layout, product
+authority, timing policy, or behavior. It is a one-way telemetry aperture, not
+a control plane.
+
+The canonical script builds optimized artifacts and runs two classes:
+
+1. an uninstrumented launch-and-pixels smoke against the exact ordinary
+   product build;
+2. instrumented stories against the same production path.
+
+Functional stories use deterministic software graphics and
+`ReactionBudget::functional`. Representative host-graphics runs alone may use
+`ReactionBudget::performance` or `CadenceBudget` to enforce production
+latency. A functional deadline is not a disguised generous performance
+threshold.
+
+## Publisher Lifecycle
+
+One product frame follows this order:
+
+1. install target instrumentation once on the egui context;
+2. begin a `FramePulse` immediately before taking product input;
+3. run normal UI, state work, replacement passes, tessellation, and any
+   application projection needed by the observation;
+4. extract final-pass targets and project the minimal state;
+5. call `FramePulse::observe` after that projection;
+6. forge an owned `PendingFrame`;
+7. render and call the graphics surface's present operation;
+8. capture `ProductInstant::now()` and enqueue with
+   `Publisher::surface_present_at`;
+9. flush the publisher before orderly process exit.
+
+Enqueue nothing when surface acquisition or rendering fails. The publisher
+serializes off-thread, in order. Any writer failure must eventually reach the
+event loop through the next enqueue or the final flush.
+
+Structural state changes should call `Context::request_discard`.
+Instrumentation clears targets at every egui pass, so discarded layouts cannot
+leak rectangles into their replacements. Wire rectangles are physical,
+window-relative pixels.
+
+## Story Law
 
 Scenarios are modules named for user intent, not widgets or implementation
-layers. Shared fixture and harness modules may contain containment setup,
-selectors, and product-independent choreography; verdict logic stays in the
-story that owns it.
+layers. A full story begins from a meaningful cold state, crosses material
+transitions with native input, and ends at user-valued evidence. Restart inside
+the story when durability is part of that value.
 
-## Adapter Lifecycle
+Each consequential step has distinct layers:
 
-One application frame follows this order:
+1. a native gesture;
+2. a temporally eligible witnessed state used only to synchronize;
+3. a rendered, durable, process, protocol, or restart oracle.
 
-1. install `egui_tester_witness::egui::install` once on the egui context;
-2. begin a `FramePulse` immediately before taking product input;
-3. run ordinary product UI and state work;
-4. call `FramePulse::observe`;
-5. tessellate, render, and present normally;
-6. capture `ProductInstant::now()` immediately after presentation;
-7. extract final-pass anchors and the smallest useful semantic state;
-8. call `Publisher::present_at`.
+The witness may say a route signature changed. Persisted geometry or visible
+pixels decide whether routing worked. A post-trigger frame is not called
+“caused” merely because no earlier frame matched.
 
-The last three telemetry operations occur after presentation so their cost
-cannot pollute either performance endpoint. Publish nothing when surface
-acquisition fails or no frame was presented.
-
-Structural state changes should call `Context::request_discard`. The witness
-plugin clears anchors at every egui pass, so discarded layouts cannot leak
-targets into the replacement pass. The published state and anchors must
-describe the frame that actually reached the display.
-
-Anchors are stable intent names such as `library.rename` or
-`editor.support/1`, expressed in physical window-relative pixels. Do not name
-layout positions or implementation types. Semantic state should expose facts
-needed for synchronization, not duplicate the product model wholesale.
-
-The product should publish a contract fingerprint in that minimal state.
-Every story verifies it before the first injected input. A stale test binary
-must fail as a schema mismatch rather than gesture against misnamed controls.
-
-## Scenario Law
-
-Every acceptance step has three distinct layers:
-
-1. a native gesture through `X11Session`;
-2. a fresh, frame-coherent witness predicate;
-3. a rendered or external product oracle.
-
-Witness state may prove that a route was recomputed; persisted geometry or
-pixels decide whether the product worked. Require controls belonging to the
-new state in transition predicates, for example `view == "edit"` together
-with `editor.support/1`.
-
-The atomic witness supplies current state and bounds. Budgeted Reactions read
-the lossless semantic journal and choose the earliest causally eligible frame;
-do not compensate for polling cadence with sleeps or an enlarged production
-budget.
-
-Fast native batches still obey human gesture causality. Modified clicks guard
-modifier acquisition and release so an event loop cannot observe only the
-final modifier state. `FrameProbe::trace` fences on a frame begun after the
-gesture completed. Product kinetics that legitimately continue afterward,
-such as smoothed wheel motion, use `JsonProbe::wait_stable` on the relevant
-semantic projection before establishing a baseline.
-
-Ordinary widgets may use `X11Session::drag`. Custom canvas gestures should
-compose held operations:
+Fast native batches still preserve gesture integrity. Modified clicks fence
+modifier press and release. Custom canvas drags should use:
 
 1. `button_down` on the witnessed target;
-2. wait until the product witnesses target acquisition;
-3. `move_to` the destination and wait for the semantic/rendered result;
-4. `button_up` and wait for release.
+2. wait for product acquisition;
+3. `move_to` and wait for recomputation;
+4. judge pixels or durable geometry;
+5. `button_up` and wait for release.
 
-This removes scheduler-dependent sleeps and tests the same capture law a user
-depends on.
+This tests pointer capture without scheduler sleeps. Product kinetics such as
+smoothed zoom use projection-scoped `Probe::wait_stable` before a baseline is
+recorded. Polyline tools may set `Stroke::knot_dwell` when the product must
+observe every corner despite native motion coalescing.
 
-## User-Story Law
+The first acceptance basis should collectively prove:
 
-An acceptance scenario is a full user story, not a widget smoke test. It begins
-from a meaningful cold state, crosses every material transition through native
-input, and ends at a user-valued result with an external oracle. Restart inside
-the story whenever durability is part of that value.
+1. cold boot to nontrivial pixels;
+2. ordinary navigation through semantic Targets;
+3. a durable mutation read through a confined private oracle;
+4. one application-defining gesture;
+5. cancellation or reversal of a nontrivial transaction;
+6. restart restoration;
+7. at least one host reaction budget;
+8. sustained host cadence where lag is product-critical;
+9. failure artifacts and a decisive success capture.
 
-The first acceptance basis for an application should collectively cover:
+Trailgen's four stories are the reference basis: discover and keep; refine
+deliberately; compare without lag; and draw from nothing. Its pin-drag story
+requires native target acquisition, real motion, route recomputation, durable
+geometry change, undo/redo, cancellation, save, and restart.
 
-1. cold boot to a real presented frame;
-2. one ordinary navigation or control transition;
-3. one durable mutation checked outside the witness;
-4. one application-defining rich interaction;
-5. at least one input-to-presentation budget;
-6. one sustained-interaction cadence budget where lag is product-critical;
-7. cancellation or reversal of one nontrivial transaction;
-8. a final screenshot and automatic failure bundle.
+## Fixtures And Oracles
 
-Trailgen supplies the reference basis as four stories: discover and keep,
-refine deliberately, compare without lag, and draw from nothing. In
-particular, its refinement story acquires pin 1, drags it to another graph
-branch, proves a different route signature within budget, cancels without disk
-mutation, repeats, saves, and compares durable support points after restart.
+Fixture seeding occurs before launch through `Testbed::copy_private`,
+`write_private`, or the product's public CLI. The product receives no
+test-only ingestion API. Network policy is scenario-declared: denied, a private
+fixture transport, or explicitly admitted host networking.
 
-## Performance Law
+After launch, product files are read through `read_private` or exported through
+`export`; raw host paths are not oracle APIs because the application controls
+names beneath its writable tree. Regional pixel assertions should bind to a
+witnessed Target with `PixelRegion::anchor`, then compare captured frames.
 
-`PerformanceBudget` judges one reaction from the gesture’s final
-result-triggering input. Deliberate pointer transport, wheel pacing, tester
-dwell, and witness I/O must not dilate it. `CadenceBudget` judges the complete
-sustained gesture from the lossless frame journal and may constrain minimum
-samples, median cadence, p95 cadence, worst cadence, and p95 product frame
-work. Run these contracts against an optimized product binary and choose host
-or software graphics explicitly; never invent an instrumentation multiplier.
+Witnesses and artifacts need a disclosure budget. Publish only state necessary
+to synchronize stories, and retain only diagnostics that explain a failure.
+Credentials, ambient user data, and unrelated model state have no place in
+either channel.
 
-The action must last long enough to produce a distribution. Lengthen the
-gesture when it yields too few samples; do not weaken the minimum merely to
-make a short trace pass.
+Failed `Story` and `X11Session` waits attempt one final capture before returning
+their original error. Capture failure never launders the primary fault.
 
-## Platform Claim
+## Porcelain Boundary
 
-X11 is the complete and release-tested backend: native input, private display,
-capture, semantic and presentation fencing, budgets, and artifacts. Product
-adoptions should first make this vertical incontrovertible. The optional
-headless Wayland capture smoke is not parity, and no adoption should spend
-architecture on Wayland until the X11 pattern has survived the next product.
+`Story<S>` is the authoring language; the containment and input crates are the
+kernel. Product scenarios should remain terse enough that direct Rust expresses
+their intent. If two adoptions expose repeated residual ceremony, a proc macro
+may compile declarative stories into this runtime. It must preserve spans,
+support explanation, and leave the ordinary API usable. It may not become a
+second scheduler or redefine evidence semantics.
 
-## Skill Scaffold
-
-An app-building skill may generate the conventional crate, script, feature,
-publisher lifecycle, and baseline boot scenario. It must require the author to
-name the semantic state, production budgets, rich interaction, and external
-oracle. Those are product decisions and must not be fabricated by middleware.
-
-## Design Defects
-
-No adoption may hide an unsupported behavior behind xdotool. Park the story and
-name the missing shared capability instead. The present defects are:
-
-- window move/resize, multi-window focus, native dialogs, and tray surfaces;
-- AccessKit selectors that can replace app-authored target anchors;
-- clipboard, IME, and text beyond the current Latin-1 injector;
-- a serializable selector/action timeline shared by tests and demo recording.
-
-Generic native Wayland input remains a known horizontal-expansion gap, but is
-deliberately deferred rather than part of the present adoption contract.
+No product may hide an unsupported interaction behind xdotool. Missing shared
+capabilities are defects to name and implement in the kernel. The current
+frontier is recorded in [Architecture](architecture.md).

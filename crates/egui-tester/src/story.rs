@@ -1,32 +1,17 @@
-use std::{borrow::Cow, time::Duration};
+use std::{fmt::Display, time::Duration};
 
 use serde::de::DeserializeOwned;
 
 use crate::{
-    ActionReceipt, Anchor, Application, Button, Condition, Drag, Frame, Key, Modifiers,
-    PerformanceBudget, Probe, ProbeFrame, Result, Stroke, Testbed, Timed, Wheel, WindowQuery,
-    X11Session,
+    ActionReceipt, Anchor, Application, Button, Condition, Drag, Frame, Key, Modifiers, Probe,
+    ProbeFrame, ReactionBudget, Result, Stroke, Testbed, Timed, Wheel, WindowQuery, X11Session,
 };
-
-/// Stable identity of a visible gesture recipient.
-///
-/// Product contract enums should implement this trait. Strings remain lawful
-/// as an escape hatch while a contract is incubating.
-pub trait Target {
-    fn wire_name(&self) -> Cow<'_, str>;
-}
-
-impl<T: AsRef<str> + ?Sized> Target for T {
-    fn wire_name(&self) -> Cow<'_, str> {
-        Cow::Borrowed(self.as_ref())
-    }
-}
 
 /// Typed, native-input story context for one running application.
 pub struct Story<'app, 'bed, S> {
     session: X11Session<'app, 'bed>,
     probe: Probe<S>,
-    reaction_budget: PerformanceBudget,
+    reaction_budget: ReactionBudget,
     target_timeout: Duration,
     wait_timeout: Duration,
 }
@@ -37,7 +22,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
         testbed: &'bed Testbed,
         app: &'app Application<'bed>,
         query: impl Into<WindowQuery>,
-        reaction_budget: PerformanceBudget,
+        reaction_budget: ReactionBudget,
     ) -> Result<Self> {
         let session = testbed.x11_session(app, query, Duration::from_secs(30))?;
         session.focus()?;
@@ -77,12 +62,15 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
     }
 
     pub fn ready(&mut self, timeout: Duration) -> Result<ProbeFrame<S>> {
-        self.probe
-            .wait_presented(self.session.application(), timeout)
+        let result = self
+            .probe
+            .wait_surface_presented(self.session.application(), timeout);
+        self.retain_failure_frame(result)
     }
 
-    pub fn frame(&self) -> Result<ProbeFrame<S>> {
-        self.probe.read()
+    pub fn frame(&mut self) -> Result<ProbeFrame<S>> {
+        let result = self.probe.read();
+        self.retain_failure_frame(result)
     }
 
     pub fn wait(&mut self, condition: Condition<S>) -> Result<ProbeFrame<S>> {
@@ -95,10 +83,12 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
         condition: Condition<S>,
     ) -> Result<ProbeFrame<S>> {
         let description = condition.description().to_owned();
-        self.probe
-            .wait_checked(self.session.application(), timeout, description, |frame| {
-                condition.evaluate(&frame.state)
-            })
+        let result =
+            self.probe
+                .wait_checked(self.session.application(), timeout, description, |frame| {
+                    condition.evaluate(&frame.state)
+                });
+        self.retain_failure_frame(result)
     }
 
     pub fn wait_stable<T: PartialEq>(
@@ -108,26 +98,26 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
         description: impl Into<String>,
         project: impl FnMut(&ProbeFrame<S>) -> Option<T>,
     ) -> Result<ProbeFrame<S>> {
-        self.probe.wait_stable(
+        let result = self.probe.wait_stable(
             self.session.application(),
             timeout,
             quiet,
             description,
             project,
-        )
+        );
+        self.retain_failure_frame(result)
     }
 
-    pub fn anchor(&mut self, target: impl Target) -> Result<Anchor> {
-        let name = target.wire_name();
-        self.probe.wait_anchor(
-            self.session.application(),
-            name.as_ref(),
-            self.target_timeout,
-        )
+    pub fn anchor(&mut self, target: impl Display) -> Result<Anchor> {
+        let name = target.to_string();
+        let result = self
+            .probe
+            .wait_anchor(self.session.application(), &name, self.target_timeout);
+        self.retain_failure_frame(result)
     }
 
-    pub fn click(&mut self, target: impl Target) -> Result<Reaction<'_, 'app, 'bed, S>> {
-        let target = target.wire_name().into_owned();
+    pub fn click(&mut self, target: impl Display) -> Result<Reaction<'_, 'app, 'bed, S>> {
+        let target = target.to_string();
         let anchor = self.anchor(target.as_str())?;
         let receipt = self
             .session
@@ -137,11 +127,11 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
 
     pub fn modified_click(
         &mut self,
-        target: impl Target,
+        target: impl Display,
         button: Button,
         modifiers: Modifiers,
     ) -> Result<Reaction<'_, 'app, 'bed, S>> {
-        let target = target.wire_name().into_owned();
+        let target = target.to_string();
         let anchor = self.anchor(target.as_str())?;
         let (x, y) = anchor.center();
         let receipt = self.session.modified_click(x, y, button, modifiers)?;
@@ -177,11 +167,11 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
 
     pub fn drag(
         &mut self,
-        target: impl Target,
+        target: impl Display,
         destination: (i16, i16),
         policy: Drag,
     ) -> Result<Reaction<'_, 'app, 'bed, S>> {
-        let target = target.wire_name().into_owned();
+        let target = target.to_string();
         let origin = self.anchor(target.as_str())?.center();
         let receipt = self.session.drag(origin, destination, policy)?;
         Ok(self.reaction_named(receipt, format!("drag `{target}`")))
@@ -235,11 +225,11 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
     /// sequence used by a person.
     pub fn replace_text(
         &mut self,
-        target: impl Target,
+        target: impl Display,
         text: &str,
         focused: Condition<S>,
     ) -> Result<Reaction<'_, 'app, 'bed, S>> {
-        let _focused = self.click(target)?.expect(focused)?;
+        let _focused = self.click(target)?.until(focused)?;
         let _selected = self.session.chord(Modifiers::CTRL, Key::Character('a'))?;
         self.type_text(text)
     }
@@ -266,19 +256,26 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S> {
             description,
         }
     }
+
+    fn retain_failure_frame<T>(&self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            let _capture = self.session.capture();
+        }
+        result
+    }
 }
 
-/// One injected gesture awaiting causally fresh product evidence.
+/// One injected gesture awaiting a temporally eligible semantic cue.
 pub struct Reaction<'story, 'app, 'bed, S> {
     story: &'story mut Story<'app, 'bed, S>,
     receipt: ActionReceipt,
-    budget: PerformanceBudget,
+    budget: ReactionBudget,
     description: String,
 }
 
 impl<S: DeserializeOwned + 'static> Reaction<'_, '_, '_, S> {
     #[must_use]
-    pub fn within(&mut self, budget: PerformanceBudget) -> &mut Self {
+    pub fn within(&mut self, budget: ReactionBudget) -> &mut Self {
         self.budget = budget;
         self
     }
@@ -287,24 +284,24 @@ impl<S: DeserializeOwned + 'static> Reaction<'_, '_, '_, S> {
         &self.receipt
     }
 
-    #[must_use]
-    pub const fn session(&self) -> &X11Session<'_, '_> {
-        &self.story.session
-    }
-
-    pub fn expect(&mut self, condition: Condition<S>) -> Result<Timed<ProbeFrame<S>>> {
-        let description = format!("{} to make {}", self.description, condition.description());
-        self.story.probe.wait_budgeted_checked(
+    /// Wait for a post-trigger witness condition.
+    ///
+    /// This fences subsequent external assertions; it does not itself prove
+    /// that the gesture caused the observed state.
+    pub fn until(&mut self, condition: Condition<S>) -> Result<Timed<ProbeFrame<S>>> {
+        let description = format!("{}; await {}", self.description, condition.description());
+        let result = self.story.probe.wait_budgeted_checked(
             self.story.session.application(),
             &self.receipt,
             self.budget,
             description,
             |frame| condition.evaluate(&frame.state),
-        )
+        );
+        self.story.retain_failure_frame(result)
     }
 
-    pub fn presented(&mut self) -> Result<Timed<ProbeFrame<S>>> {
-        self.expect(Condition::new("a fresh presented frame", |_| true))
+    pub fn next_frame(&mut self) -> Result<Timed<ProbeFrame<S>>> {
+        self.until(Condition::new("a fresh surface-presented frame", |_| true))
     }
 }
 

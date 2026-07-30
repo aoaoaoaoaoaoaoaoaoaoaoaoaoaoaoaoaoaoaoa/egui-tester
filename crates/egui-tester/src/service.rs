@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    Error, FrameProbe, JsonProbe, Result,
+    Error, FrameProbe, Probe, Result,
     error::io,
     testbed::{DisplaySeal, Testbed},
 };
@@ -171,6 +171,7 @@ pub struct Application<'a> {
     stderr: PathBuf,
     witness: Option<WitnessSeal>,
     stopped: Cell<bool>,
+    liveness: Cell<Option<(Instant, bool)>>,
     testbed: &'a Testbed,
 }
 
@@ -230,10 +231,6 @@ impl<'a> Application<'a> {
             }
             remove_stale(&witness.host, "remove stale witness")?;
             remove_stale(&witness.frame_host, "remove stale frame journal")?;
-            remove_stale(
-                &egui_tester_witness::observation_path(&witness.host),
-                "remove stale observation journal",
-            )?;
         }
 
         let bwrap = bwrap_argv(testbed, &command, &binary, &borrows, witness.as_ref())?;
@@ -263,7 +260,10 @@ impl<'a> Application<'a> {
             ])
             .arg(format!(
                 "--property=RuntimeMaxSec={}s",
-                command.runtime.as_secs()
+                command
+                    .runtime
+                    .as_secs()
+                    .saturating_add(u64::from(command.runtime.subsec_nanos() != 0))
             ))
             .arg(format!(
                 "--property=ReadWritePaths={}",
@@ -299,6 +299,7 @@ impl<'a> Application<'a> {
             stderr,
             witness,
             stopped: Cell::new(false),
+            liveness: Cell::new(None),
             testbed,
         };
         Ok(app)
@@ -319,12 +320,12 @@ impl<'a> Application<'a> {
         &self.stderr
     }
 
-    pub fn witness(&self) -> Result<JsonProbe> {
+    pub fn witness(&self) -> Result<Probe> {
         let seal = self.witness.as_ref().ok_or_else(|| Error::Unsupported {
             capability: "standard witness",
             detail: "launch the application with AppCommand::witness".to_owned(),
         })?;
-        Ok(JsonProbe::sealed(&seal.host, &seal.launch))
+        Ok(Probe::sealed(&seal.host, &seal.launch))
     }
 
     pub fn frames(&self) -> Result<FrameProbe> {
@@ -342,8 +343,15 @@ impl<'a> Application<'a> {
 
     pub fn ensure_running(&self, waiting: impl Into<String>) -> Result<()> {
         let waiting = waiting.into();
+        if self.liveness.get().is_some_and(|(checked, running)| {
+            running && checked.elapsed() < Duration::from_millis(100)
+        }) {
+            return Ok(());
+        }
         let status = self.status()?;
-        if status.sub_state == "running" {
+        let running = status.sub_state == "running";
+        self.liveness.set(Some((Instant::now(), running)));
+        if running {
             return Ok(());
         }
         Err(Error::ApplicationExited {
@@ -408,7 +416,7 @@ impl<'a> Application<'a> {
     }
 
     pub fn terminate(&self) -> Result<()> {
-        if self.stopped.replace(true) {
+        if self.stopped.get() {
             return Ok(());
         }
         let output = self
@@ -428,6 +436,8 @@ impl<'a> Application<'a> {
             });
         }
         reset_unit(self.testbed, &self.unit);
+        self.stopped.set(true);
+        self.liveness.set(Some((Instant::now(), false)));
         Ok(())
     }
 
@@ -574,10 +584,17 @@ fn bwrap_argv(
             ]);
         }
         Graphics::Host => {
+            args.extend([OsString::from("--dev"), OsString::from("/dev")]);
+            let devices = host_graphics_devices()?;
+            append_device_parent_dirs(&mut args, &devices);
+            for device in devices {
+                args.extend([
+                    OsString::from("--dev-bind"),
+                    device.as_os_str().to_owned(),
+                    device.into_os_string(),
+                ]);
+            }
             args.extend([
-                OsString::from("--dev-bind"),
-                OsString::from("/dev"),
-                OsString::from("/dev"),
                 OsString::from("--ro-bind"),
                 OsString::from("/sys"),
                 OsString::from("/sys"),
@@ -699,10 +716,12 @@ fn lavapipe_root() -> Result<PathBuf> {
 }
 
 fn validate_command(command: &AppCommand) -> Result<()> {
-    const RESERVED: [&str; 15] = [
+    const RESERVED: &[&str] = &[
+        "PATH",
         "DISPLAY",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
+        "WINIT_UNIX_BACKEND",
         "HOME",
         "TMPDIR",
         "XDG_CONFIG_HOME",
@@ -712,6 +731,23 @@ fn validate_command(command: &AppCommand) -> Result<()> {
         "XDG_RUNTIME_DIR",
         "DBUS_SESSION_BUS_ADDRESS",
         "DBUS_SYSTEM_BUS_ADDRESS",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "RUST_BACKTRACE",
+        "LD_LIBRARY_PATH",
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "VK_ICD_FILENAMES",
+        "VK_DRIVER_FILES",
+        "VK_ADD_DRIVER_FILES",
+        "LIBGL_ALWAYS_SOFTWARE",
+        "LIBGL_DRIVERS_PATH",
+        "MESA_LOADER_DRIVER_OVERRIDE",
+        "WGPU_BACKEND",
+        "WGPU_POWER_PREF",
+        "__GLX_VENDOR_LIBRARY_NAME",
+        "DRI_PRIME",
         egui_tester_witness::PATH_ENV,
         egui_tester_witness::LAUNCH_ENV,
         egui_tester_witness::FRAMES_ENV,
@@ -772,6 +808,73 @@ fn validate_command(command: &AppCommand) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn host_graphics_devices() -> Result<Vec<PathBuf>> {
+    let mut devices = Vec::new();
+    for root in [Path::new("/dev/dri"), Path::new("/dev/nvidia-caps")] {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| io("enumerate graphics devices", root, error))?;
+            let metadata = entry
+                .metadata()
+                .map_err(|error| io("inspect graphics device", entry.path(), error))?;
+            if metadata.file_type().is_char_device() {
+                devices.push(entry.path());
+            }
+        }
+    }
+    let dev = Path::new("/dev");
+    let entries =
+        std::fs::read_dir(dev).map_err(|error| io("enumerate graphics devices", dev, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| io("enumerate graphics devices", dev, error))?;
+        let name = entry.file_name();
+        if (name == "kfd" || nvidia_device(&name))
+            && entry
+                .file_type()
+                .map_err(|error| io("inspect graphics device", entry.path(), error))?
+                .is_char_device()
+        {
+            devices.push(entry.path());
+        }
+    }
+    devices.sort();
+    devices.dedup();
+    if devices.is_empty() {
+        return Err(Error::Unsupported {
+            capability: "host graphics",
+            detail: "no DRM, KFD, or NVIDIA graphics devices are accessible".to_owned(),
+        });
+    }
+    Ok(devices)
+}
+
+fn nvidia_device(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        matches!(
+            name,
+            "nvidiactl" | "nvidia-modeset" | "nvidia-uvm" | "nvidia-uvm-tools"
+        ) || name
+            .strip_prefix("nvidia")
+            .is_some_and(|slot| !slot.is_empty() && slot.bytes().all(|byte| byte.is_ascii_digit()))
+    })
+}
+
+fn append_device_parent_dirs(args: &mut Vec<OsString>, devices: &[PathBuf]) {
+    let mut parents = devices
+        .iter()
+        .filter_map(|device| device.parent())
+        .filter(|parent| *parent != Path::new("/dev"))
+        .map(Path::to_owned)
+        .collect::<Vec<_>>();
+    parents.sort();
+    parents.dedup();
+    for parent in parents {
+        args.extend([OsString::from("--dir"), parent.as_os_str().to_owned()]);
+    }
 }
 
 struct ReadOnlyMount {
@@ -862,10 +965,7 @@ pub(crate) struct UserBus {
 
 impl UserBus {
     pub(crate) fn discover() -> Result<Self> {
-        let canonical = PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()));
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or(canonical);
+        let runtime = PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()));
         let metadata = std::fs::metadata(&runtime)
             .map_err(|err| io("inspect user runtime directory", &runtime, err))?;
         if !metadata.is_dir() {
@@ -883,8 +983,7 @@ impl UserBus {
                 detail: format!("canonical user bus `{}` is not a socket", bus.display()),
             });
         }
-        let address = std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
-            .unwrap_or_else(|| OsString::from(format!("unix:path={}", bus.display())));
+        let address = OsString::from(format!("unix:path={}", bus.display()));
         let user_bus = Self {
             runtime: runtime.into_os_string(),
             address,
@@ -935,4 +1034,26 @@ fn confined_relative(path: &Path) -> bool {
         && path
             .components()
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graphics_allowlist_admits_arbitrary_nvidia_slots_only() {
+        for admitted in [
+            "nvidia0",
+            "nvidia27",
+            "nvidiactl",
+            "nvidia-modeset",
+            "nvidia-uvm",
+            "nvidia-uvm-tools",
+        ] {
+            assert!(nvidia_device(OsStr::new(admitted)), "{admitted}");
+        }
+        for rejected in ["nvidia", "nvidia2x", "nvidia-smi", "nvme0"] {
+            assert!(!nvidia_device(OsStr::new(rejected)), "{rejected}");
+        }
+    }
 }

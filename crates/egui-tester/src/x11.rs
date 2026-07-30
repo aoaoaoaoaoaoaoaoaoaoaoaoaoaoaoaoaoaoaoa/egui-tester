@@ -27,7 +27,8 @@ use x11rb::{
 use xkeysym::Keysym;
 
 use crate::{
-    ActionReceipt, Application, Error, Frame, Probe, Quiet, Result, Testbed, pixels::wait_quiet,
+    ActionReceipt, Application, Error, Frame, PixelRegion, Probe, Quiet, Result, Testbed,
+    pixels::wait_quiet,
 };
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
@@ -95,6 +96,11 @@ pub struct Stroke {
     pub press_duration: Duration,
     pub steps_per_leg: u16,
     pub leg_duration: Duration,
+    /// Dwell at each knot before beginning the next leg.
+    ///
+    /// Use this when the product must observe polyline corners despite native
+    /// motion coalescing. The final dwell precedes button release.
+    pub knot_dwell: Duration,
 }
 
 impl Default for Stroke {
@@ -104,6 +110,7 @@ impl Default for Stroke {
             press_duration: Duration::from_millis(32),
             steps_per_leg: 8,
             leg_duration: Duration::from_millis(120),
+            knot_dwell: Duration::ZERO,
         }
     }
 }
@@ -511,6 +518,7 @@ impl X11Controller {
                 press_duration: policy.press_duration,
                 steps_per_leg: policy.steps,
                 leg_duration: policy.duration,
+                knot_dwell: Duration::ZERO,
             },
         )
     }
@@ -551,14 +559,11 @@ impl X11Controller {
             thread::sleep(policy.press_duration);
         }
         let pause = policy.leg_duration / u32::from(policy.steps_per_leg);
-        for (leg_index, leg) in knots.windows(2).enumerate() {
+        for leg in knots.windows(2) {
             let [from, to] = leg else {
                 continue;
             };
             for step in 1..=policy.steps_per_leg {
-                if leg_index + 2 == knots.len() && step == policy.steps_per_leg {
-                    receipt = receipt.trigger();
-                }
                 let fraction = f64::from(step) / f64::from(policy.steps_per_leg);
                 let x = f64::from(from.0)
                     .mul_add(1.0 - fraction, f64::from(to.0) * fraction)
@@ -575,7 +580,11 @@ impl X11Controller {
                     thread::sleep(pause);
                 }
             }
+            if !policy.knot_dwell.is_zero() {
+                thread::sleep(policy.knot_dwell);
+            }
         }
+        receipt = receipt.trigger();
         if let Err(err) = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0) {
             let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
             let _flushed = self.flush("recover pointer stroke release");
@@ -673,6 +682,35 @@ impl X11Controller {
             if Instant::now() >= deadline {
                 return Err(Error::Timeout {
                     waiting: format!("window pixels to change by at least {minimum_fraction:.5}"),
+                    timeout,
+                });
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    pub fn wait_changed_region(
+        &self,
+        app: &Application<'_>,
+        window: &Window,
+        baseline: &Frame,
+        region: PixelRegion,
+        minimum_fraction: f64,
+        channel_slop: u8,
+        timeout: Duration,
+    ) -> Result<Frame> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            app.ensure_running("window pixel region to change")?;
+            let frame = self.capture(window)?;
+            if baseline.difference_region(&frame, region, channel_slop)? >= minimum_fraction {
+                return Ok(frame);
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout {
+                    waiting: format!(
+                        "window pixel region to change by at least {minimum_fraction:.5}"
+                    ),
                     timeout,
                 });
             }
@@ -975,13 +1013,15 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         Ok(frame)
     }
 
-    /// Wait for the standard post-present witness, then sample product pixels.
-    pub fn wait_presented<S: DeserializeOwned>(
+    /// Wait for the standard surface-present cue, then sample product pixels.
+    pub fn wait_surface_presented<S: DeserializeOwned>(
         &self,
         probe: &mut Probe<S>,
         timeout: Duration,
     ) -> Result<Frame> {
-        let _presented = probe.wait_presented(self.app, timeout)?;
+        let presented = probe.wait_surface_presented(self.app, timeout);
+        self.retain_failure_frame(&presented);
+        let _presented = presented?;
         self.capture()
     }
 
@@ -992,22 +1032,37 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         channel_slop: u8,
         timeout: Duration,
     ) -> Result<Frame> {
-        let frame = self.controller.wait_changed(
+        self.remember_result(self.controller.wait_changed(
             self.app,
             &self.window,
             baseline,
             minimum_fraction,
             channel_slop,
             timeout,
-        )?;
-        self.remember(&frame)?;
-        Ok(frame)
+        ))
+    }
+
+    pub fn wait_changed_region(
+        &self,
+        baseline: &Frame,
+        region: PixelRegion,
+        minimum_fraction: f64,
+        channel_slop: u8,
+        timeout: Duration,
+    ) -> Result<Frame> {
+        self.remember_result(self.controller.wait_changed_region(
+            self.app,
+            &self.window,
+            baseline,
+            region,
+            minimum_fraction,
+            channel_slop,
+            timeout,
+        ))
     }
 
     pub fn wait_quiet(&self, policy: Quiet) -> Result<Frame> {
-        let frame = self.controller.wait_quiet(self.app, &self.window, policy)?;
-        self.remember(&frame)?;
-        Ok(frame)
+        self.remember_result(self.controller.wait_quiet(self.app, &self.window, policy))
     }
 
     fn record(&self, receipt: &ActionReceipt) -> Result<()> {
@@ -1038,6 +1093,25 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
 
     fn remember(&self, frame: &Frame) -> Result<()> {
         frame.save_png(&self.latest_capture)
+    }
+
+    fn remember_result(&self, result: Result<Frame>) -> Result<Frame> {
+        match result {
+            Ok(frame) => {
+                self.remember(&frame)?;
+                Ok(frame)
+            }
+            Err(error) => {
+                let _capture = self.capture();
+                Err(error)
+            }
+        }
+    }
+
+    fn retain_failure_frame<T>(&self, result: &Result<T>) {
+        if result.is_err() {
+            let _capture = self.capture();
+        }
     }
 }
 

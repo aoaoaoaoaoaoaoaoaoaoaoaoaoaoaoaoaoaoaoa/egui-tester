@@ -8,7 +8,7 @@ pub use egui_tester_witness::FrameSample;
 
 use crate::{ActionReceipt, Application, Error, Result};
 
-/// Reader for the lossless, low-tax product frame journal.
+/// Reader for the lossless product frame-timing journal.
 #[derive(Debug)]
 pub struct FrameProbe {
     path: PathBuf,
@@ -203,7 +203,7 @@ impl CadenceBudget {
     }
 }
 
-/// Corrected product frame statistics; post-present witness tax is removed.
+/// Raw product frame statistics from timestamps captured on the UI thread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CadenceReport {
     pub frames: usize,
@@ -211,7 +211,6 @@ pub struct CadenceReport {
     pub p95: Duration,
     pub worst: Duration,
     pub paint_p95: Duration,
-    pub witness_tax: Duration,
 }
 
 impl CadenceReport {
@@ -221,17 +220,13 @@ impl CadenceReport {
         }
         let mut cadence = samples
             .windows(2)
-            .map(|pair| {
-                let prior = pair[0];
-                let next = pair[1];
-                let raw = next.begun_ns.saturating_sub(prior.begun_ns);
-                let tax = prior.retired_ns.saturating_sub(prior.presented_ns);
-                Duration::from_nanos(raw.saturating_sub(tax))
-            })
+            .map(|pair| Duration::from_nanos(pair[1].begun_ns.saturating_sub(pair[0].begun_ns)))
             .collect::<Vec<_>>();
         let mut paint = samples
             .iter()
-            .map(|sample| Duration::from_nanos(sample.presented_ns - sample.begun_ns))
+            .map(|sample| {
+                Duration::from_nanos(sample.surface_presented_ns.saturating_sub(sample.begun_ns))
+            })
             .collect::<Vec<_>>();
         cadence.sort_unstable();
         paint.sort_unstable();
@@ -241,11 +236,6 @@ impl CadenceReport {
             p95: percentile(&cadence, 95),
             worst: *cadence.last()?,
             paint_p95: percentile(&paint, 95),
-            witness_tax: samples.iter().fold(Duration::ZERO, |sum, sample| {
-                sum.saturating_add(Duration::from_nanos(
-                    sample.retired_ns.saturating_sub(sample.presented_ns),
-                ))
-            }),
         })
     }
 }
@@ -264,25 +254,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cadence_removes_post_present_witness_tax() {
-        let samples = vec![
-            sample(0, 0, 10, 14),
-            sample(1, 20, 30, 34),
-            sample(2, 40, 50, 54),
-        ];
+    fn cadence_uses_unmodified_ui_thread_timestamps() {
+        let samples = vec![sample(0, 0, 10), sample(1, 20, 30), sample(2, 40, 50)];
         let report = CadenceReport::forge(&samples).expect("cadence");
-        assert_eq!(report.p50, Duration::from_nanos(16));
+        assert_eq!(report.p50, Duration::from_nanos(20));
         assert_eq!(report.paint_p95, Duration::from_nanos(10));
-        assert_eq!(report.witness_tax, Duration::from_nanos(12));
     }
 
     #[test]
     fn gesture_trace_excludes_an_in_flight_predecessor() {
-        let trace = FrameTrace::new(vec![
-            sample(0, 0, 10, 14),
-            sample(1, 20, 30, 34),
-            sample(2, 40, 50, 54),
-        ]);
+        let trace = FrameTrace::new(vec![sample(0, 0, 10), sample(1, 20, 30), sample(2, 40, 50)]);
         let action = ActionReceipt::for_test(15, 35, 45);
         assert_eq!(
             trace
@@ -295,14 +276,13 @@ mod tests {
         );
     }
 
-    fn sample(frame: u64, begun_ns: u64, presented_ns: u64, retired_ns: u64) -> FrameSample {
+    fn sample(frame: u64, begun_ns: u64, surface_presented_ns: u64) -> FrameSample {
         FrameSample {
             frame,
-            presentation: frame + 1,
+            surface_sequence: frame + 1,
             begun_ns,
             observed_ns: begun_ns + 5,
-            presented_ns,
-            retired_ns,
+            surface_presented_ns,
         }
     }
 }

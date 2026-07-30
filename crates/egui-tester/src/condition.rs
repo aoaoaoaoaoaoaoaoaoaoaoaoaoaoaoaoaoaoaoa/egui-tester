@@ -3,8 +3,6 @@ use std::{
     ops::{BitAnd, BitOr, Not},
 };
 
-use crate::ProbeFrame;
-
 type Judge<S> = dyn Fn(&S) -> Result<(), String>;
 
 /// Reified semantic predicate with a diagnostic rejection.
@@ -174,11 +172,6 @@ pub fn field<S, V>(name: impl Into<String>, project: impl Fn(&S) -> V + 'static)
         name: name.into(),
         project: Box::new(project),
     }
-}
-
-#[must_use]
-pub fn state<S: 'static>(condition: Condition<S>) -> Condition<ProbeFrame<S>> {
-    condition.contramap(|frame: &ProbeFrame<S>| &frame.state)
 }
 
 #[cfg(test)]
