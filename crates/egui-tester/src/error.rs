@@ -53,6 +53,9 @@ pub enum Error {
     #[error("invalid probe `{path}`: {detail}")]
     Probe { path: PathBuf, detail: String },
 
+    #[error("invalid frame journal `{path}`: {detail}")]
+    FrameJournal { path: PathBuf, detail: String },
+
     #[error("backend capability `{capability}` is unavailable: {detail}")]
     Unsupported {
         capability: &'static str,

@@ -6,6 +6,7 @@
 //! application.
 
 mod error;
+mod frames;
 mod pixels;
 mod probe;
 mod service;
@@ -14,9 +15,12 @@ mod timing;
 mod x11;
 
 pub use error::{Error, Result};
+pub use frames::{CadenceBudget, CadenceReport, FrameProbe, FrameSample, FrameTrace};
 pub use pixels::{Frame, Quiet};
 pub use probe::{Anchor, JsonProbe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
 pub use timing::{ActionReceipt, PerformanceBudget, PerformanceEndpoint, Timed};
-pub use x11::{Button, Drag, Key, Modifiers, Window, WindowQuery, X11Controller, X11Session};
+pub use x11::{
+    Button, Drag, Key, Modifiers, Stroke, Wheel, Window, WindowQuery, X11Controller, X11Session,
+};

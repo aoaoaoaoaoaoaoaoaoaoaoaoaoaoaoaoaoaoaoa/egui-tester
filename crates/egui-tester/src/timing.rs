@@ -21,30 +21,65 @@ impl PerformanceEndpoint {
     }
 }
 
-/// Monotonic instant immediately before a native input operation begins.
+/// Monotonic bounds and reaction trigger for one native input gesture.
 #[must_use = "an action receipt may be used to enforce a performance budget"]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionReceipt {
-    started_ns: u64,
+    gesture_started_ns: u64,
+    triggered_ns: u64,
+    completed_ns: u64,
     action: String,
 }
 
 impl ActionReceipt {
     pub(crate) fn begin(action: impl Into<String>) -> Self {
+        let gesture_started_ns = egui_tester_witness::monotonic_ns();
         Self {
-            started_ns: egui_tester_witness::monotonic_ns(),
+            gesture_started_ns,
+            triggered_ns: gesture_started_ns,
+            completed_ns: gesture_started_ns,
             action: action.into(),
         }
     }
 
+    pub(crate) fn trigger(mut self) -> Self {
+        self.triggered_ns = egui_tester_witness::monotonic_ns();
+        self
+    }
+
+    pub(crate) fn finish(mut self) -> Self {
+        self.completed_ns = egui_tester_witness::monotonic_ns();
+        self
+    }
+
     #[must_use]
-    pub const fn started_ns(&self) -> u64 {
-        self.started_ns
+    pub const fn gesture_started_ns(&self) -> u64 {
+        self.gesture_started_ns
+    }
+
+    #[must_use]
+    pub const fn triggered_ns(&self) -> u64 {
+        self.triggered_ns
+    }
+
+    #[must_use]
+    pub const fn completed_ns(&self) -> u64 {
+        self.completed_ns
     }
 
     #[must_use]
     pub fn action(&self) -> &str {
         &self.action
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(gesture_started_ns: u64, triggered_ns: u64, completed_ns: u64) -> Self {
+        Self {
+            gesture_started_ns,
+            triggered_ns,
+            completed_ns,
+            action: "test action".to_owned(),
+        }
     }
 }
 
@@ -108,16 +143,15 @@ impl PerformanceBudget {
         value: T,
     ) -> Result<Timed<T>> {
         let operation = operation.into();
-        let elapsed_ns =
-            observed_ns
-                .checked_sub(receipt.started_ns)
-                .ok_or_else(|| Error::Timing {
-                    operation: operation.clone(),
-                    detail: format!(
-                        "application observation {observed_ns} predates input {}",
-                        receipt.started_ns
-                    ),
-                })?;
+        let elapsed_ns = observed_ns
+            .checked_sub(receipt.triggered_ns)
+            .ok_or_else(|| Error::Timing {
+                operation: operation.clone(),
+                detail: format!(
+                    "application observation {observed_ns} predates input trigger {}",
+                    receipt.triggered_ns
+                ),
+            })?;
         let elapsed = Duration::from_nanos(elapsed_ns);
         if elapsed > self.production {
             return Err(Error::TooSlow {
@@ -162,10 +196,7 @@ mod tests {
     fn functional_timeout_never_dilates_the_production_budget() {
         let budget =
             PerformanceBudget::new(Duration::from_millis(20)).timeout(Duration::from_secs(30));
-        let receipt = ActionReceipt {
-            started_ns: 1_000_000,
-            action: "strike".to_owned(),
-        };
+        let receipt = ActionReceipt::for_test(1_000_000, 1_000_000, 1_000_000);
         let error = budget
             .adjudicate("repaint", &receipt, 22_000_001, ())
             .expect_err("twenty-one milliseconds must breach twenty");

@@ -21,6 +21,8 @@ pub struct ProbeFrame {
     pub launch: String,
     pub frame: u64,
     #[serde(default)]
+    pub begun_ns: u64,
+    #[serde(default)]
     pub observed_ns: u64,
     #[serde(default)]
     pub presented_ns: u64,
@@ -46,6 +48,28 @@ pub struct JsonProbe {
     path: PathBuf,
     expected_launch: Option<String>,
     last_frame: u64,
+}
+
+struct Stability<T>(Option<(T, Instant)>);
+
+impl<T: PartialEq> Stability<T> {
+    const fn new() -> Self {
+        Self(None)
+    }
+
+    fn observe(&mut self, value: T, now: Instant, quiet: Duration) -> bool {
+        match &mut self.0 {
+            Some((prior, since)) if prior == &value => now.duration_since(*since) >= quiet,
+            slot => {
+                *slot = Some((value, now));
+                false
+            }
+        }
+    }
+
+    fn break_streak(&mut self) {
+        self.0 = None;
+    }
 }
 
 impl JsonProbe {
@@ -147,6 +171,52 @@ impl JsonProbe {
         )
     }
 
+    /// Wait until a semantic projection remains unchanged for `quiet`.
+    ///
+    /// This fences product kinetics such as inertial scrolling without making
+    /// pixel animation, witness polling, or an arbitrary sleep part of the
+    /// product contract.
+    pub fn wait_stable<T: PartialEq>(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+        quiet: Duration,
+        description: impl Into<String>,
+        mut project: impl FnMut(&ProbeFrame) -> Option<T>,
+    ) -> Result<ProbeFrame> {
+        let description = description.into();
+        let deadline = Instant::now() + timeout;
+        let mut stable = Stability::new();
+        let mut invalid = None;
+        loop {
+            app.ensure_running(&description)?;
+            match self.read() {
+                Ok(frame) => {
+                    invalid = None;
+                    let now = Instant::now();
+                    if let Some(value) = project(&frame) {
+                        if stable.observe(value, now, quiet) {
+                            self.last_frame = frame.frame;
+                            return Ok(frame);
+                        }
+                    } else {
+                        stable.break_streak();
+                    }
+                }
+                Err(Error::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {}
+                Err(err @ Error::Probe { .. }) => invalid = Some(err),
+                Err(err) => return Err(err),
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid.unwrap_or(Error::Timeout {
+                    waiting: description,
+                    timeout,
+                }));
+            }
+            thread::sleep(Duration::from_millis(12));
+        }
+    }
+
     /// Wait for a fresh semantic result and enforce its production latency.
     ///
     /// The end timestamp was captured inside the application before witness
@@ -168,7 +238,8 @@ impl JsonProbe {
             description.clone(),
             |frame| {
                 frame.frame > prior
-                    && endpoint.timestamp(frame) >= receipt.started_ns()
+                    && frame.begun_ns >= receipt.triggered_ns()
+                    && endpoint.timestamp(frame) >= receipt.triggered_ns()
                     && predicate(frame)
             },
         )?;
@@ -195,14 +266,18 @@ impl JsonProbe {
                     frame.launch
                 ));
             }
-            if frame.observed_ns == 0 || frame.presented_ns == 0 || frame.presentation == 0 {
+            if frame.begun_ns == 0
+                || frame.observed_ns == 0
+                || frame.presented_ns == 0
+                || frame.presentation == 0
+            {
                 return self.invalid(
-                    "sealed witness omitted observation or presentation timestamp".to_owned(),
+                    "sealed witness omitted begin, observation, or presentation timestamp"
+                        .to_owned(),
                 );
             }
-            if frame.presented_ns < frame.observed_ns {
-                return self
-                    .invalid("presentation timestamp predates product observation".to_owned());
+            if frame.observed_ns < frame.begun_ns || frame.presented_ns < frame.observed_ns {
+                return self.invalid("sealed witness timestamps are not monotonic".to_owned());
             }
         }
         if frame.ppp.is_some_and(|ppp| !ppp.is_finite() || ppp <= 0.0) {
@@ -240,6 +315,7 @@ mod tests {
             schema: 0,
             launch: String::new(),
             frame: 1,
+            begun_ns: 0,
             observed_ns: 0,
             presented_ns: 0,
             presentation: 0,
@@ -251,5 +327,27 @@ mod tests {
             state: Value::Null,
         };
         assert!(probe.validate(&frame).is_err());
+    }
+
+    #[test]
+    fn semantic_stability_restarts_when_the_projection_moves() {
+        let epoch = Instant::now();
+        let mut stability = Stability::new();
+        assert!(!stability.observe(1, epoch, Duration::from_millis(50)));
+        assert!(!stability.observe(
+            1,
+            epoch + Duration::from_millis(40),
+            Duration::from_millis(50)
+        ));
+        assert!(!stability.observe(
+            2,
+            epoch + Duration::from_millis(60),
+            Duration::from_millis(50)
+        ));
+        assert!(stability.observe(
+            2,
+            epoch + Duration::from_millis(110),
+            Duration::from_millis(50)
+        ));
     }
 }

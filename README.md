@@ -12,14 +12,15 @@ The name is intentionally utilitarian.
 The X11 backend is the complete MVP:
 
 - private authenticated Xvfb, never the caller's `DISPLAY`
-- XTEST pointer, held-button, drag, wheel, modifier, function-key, and Latin-1
-  keyboard input from Rust
+- XTEST pointer, held-button, timed polyline stroke, paced wheel, guarded
+  modifier, function-key, and Latin-1 keyboard input from Rust
 - window discovery, focus, RGBA capture, PNG artifacts
 - bounded waits for windows, witness predicates, external effects, pixel
   change, and pixel quiescence
 - versioned, launch-sealed, post-present witnesses through
   `egui-tester-witness`
 - input-to-observation and input-to-presentation performance budgets
+- lossless frame journals with witness-tax-corrected cadence budgets
 - action transcripts, last-good captures, and automatic failure bundles
 
 The Wayland backend owns a headless Weston compositor and captures its virtual
@@ -61,10 +62,10 @@ files the product emitted into private state, process exits, or externally
 observable protocol effects. Tests should not adjudicate success from a
 witness state that merely mirrors an implementation field.
 
-There is no omnibus “settled” bit. Compose the synchronization appropriate to
-the interaction:
+There is no omnibus application “settled” bit. Compose the synchronization
+appropriate to the interaction:
 
-- `JsonProbe::wait` and `wait_fresh`
+- `JsonProbe::wait`, `wait_fresh`, and projection-scoped `wait_stable`
 - `Application::wait_until` for external predicates
 - `X11Session::wait_changed`
 - `X11Session::wait_quiet` with explicit tolerance and consecutive samples
@@ -74,11 +75,18 @@ sample pixels; they should not demand quiescence from an animation.
 
 `PerformanceBudget` keeps the production threshold separate from its larger
 functional timeout. `JsonProbe::wait_budgeted` measures a native-input
-`ActionReceipt` against an in-product monotonic timestamp. Observation budgets
-end after product-state work and before witness work. Calling
-`through_presentation()` instead ends after the corresponding real frame was
-presented. Polling, screenshots, anchor extraction, serialization, and witness
-I/O cannot consume either budget.
+`ActionReceipt` from its result-triggering input against an in-product
+monotonic timestamp; deliberate pointer transport and wheel pacing are
+excluded. Observation budgets end after product-state work and before witness
+work. Calling `through_presentation()` instead ends after the corresponding
+real frame was presented. Polling, screenshots, anchor extraction,
+serialization, and witness I/O cannot consume either budget.
+
+Sustained interactions use `Application::frames`, `FrameProbe::trace`, and
+`CadenceBudget`. The frame journal records begin, semantic observation,
+presentation, and telemetry retirement. Cadence reports subtract preceding
+post-present witness tax before enforcing p50, p95, worst, and p95 frame-work
+limits.
 
 ## Example
 
@@ -147,16 +155,17 @@ It opens the UI recess, changes water mode, adjudicates real pixel changes,
 waits for the private slate without a scripted sleep, restarts booru, and
 proves persistence.
 
-Trailgen is the first standard-witness adoption:
+Trailgen is the reference full user-story adoption:
 
 ```console
 cd ../adequate_trailgen
 scripts/test-gui
 ```
 
-Its release-mode acceptance creates a project through the real CLI, opens and
-renames a saved trail, acquires and drags a map pin, proves live route
-recomputation, persists it, and checks the library as an external oracle.
+Its release-mode acceptance contains four independent stories: GUI project
+creation and local provider acquisition; rename, pin drag, undo/redo, cancel,
+save, and restart; twelve-candidate comparison under pan/zoom cadence budgets;
+and manual partial-edge loop drawing with profile interaction and restart.
 
 Wayland validation is optional until Weston is installed:
 

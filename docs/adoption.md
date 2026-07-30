@@ -17,6 +17,7 @@ A conventional repository provides:
 
 ```text
 crates/<product>-acceptance/
+  src/stories/
 scripts/test-gui
 ```
 
@@ -25,21 +26,32 @@ runs the acceptance executable. The acceptance executable derives the sibling
 product binary by default, accepts an artifact directory, and uses
 `TestbedBuilder::failure_artifacts`.
 
+Scenarios are modules named for user intent, not widgets or implementation
+layers. Shared fixture and harness modules may contain containment setup,
+selectors, and product-independent choreography; verdict logic stays in the
+story that owns it.
+
 ## Adapter Lifecycle
 
 One application frame follows this order:
 
-1. clear the preceding pass's anchors;
-2. run ordinary product UI and state work;
-3. capture `ProductInstant::now()` as the observation endpoint;
-4. tessellate, render, and present normally;
-5. capture another `ProductInstant::now()` as the presentation endpoint;
-6. extract anchors and the smallest useful semantic state;
-7. call `Publisher::present_at`.
+1. install `egui_tester_witness::egui::install` once on the egui context;
+2. begin a `FramePulse` immediately before taking product input;
+3. run ordinary product UI and state work;
+4. call `FramePulse::observe`;
+5. tessellate, render, and present normally;
+6. capture `ProductInstant::now()` immediately after presentation;
+7. extract final-pass anchors and the smallest useful semantic state;
+8. call `Publisher::present_at`.
 
 The last three telemetry operations occur after presentation so their cost
 cannot pollute either performance endpoint. Publish nothing when surface
 acquisition fails or no frame was presented.
+
+Structural state changes should call `Context::request_discard`. The witness
+plugin clears anchors at every egui pass, so discarded layouts cannot leak
+targets into the replacement pass. The published state and anchors must
+describe the frame that actually reached the display.
 
 Anchors are stable intent names such as `library.rename` or
 `editor.support/1`, expressed in physical window-relative pixels. Do not name
@@ -59,6 +71,13 @@ pixels decide whether the product worked. Require controls belonging to the
 new state in transition predicates, for example `view == "edit"` together
 with `editor.support/1`.
 
+Fast native batches still obey human gesture causality. Modified clicks guard
+modifier acquisition and release so an event loop cannot observe only the
+final modifier state. `FrameProbe::trace` fences on a frame begun after the
+gesture completed. Product kinetics that legitimately continue afterward,
+such as smoothed wheel motion, use `JsonProbe::wait_stable` on the relevant
+semantic projection before establishing a baseline.
+
 Ordinary widgets may use `X11Session::drag`. Custom canvas gestures should
 compose held operations:
 
@@ -70,21 +89,43 @@ compose held operations:
 This removes scheduler-dependent sleeps and tests the same capture law a user
 depends on.
 
-## Minimum Dogfood
+## User-Story Law
 
-The first scenario for an application should cover:
+An acceptance scenario is a full user story, not a widget smoke test. It begins
+from a meaningful cold state, crosses every material transition through native
+input, and ends at a user-valued result with an external oracle. Restart inside
+the story whenever durability is part of that value.
+
+The first acceptance basis for an application should collectively cover:
 
 1. cold boot to a real presented frame;
 2. one ordinary navigation or control transition;
 3. one durable mutation checked outside the witness;
 4. one application-defining rich interaction;
 5. at least one input-to-presentation budget;
-6. a final screenshot and automatic failure bundle.
+6. one sustained-interaction cadence budget where lag is product-critical;
+7. cancellation or reversal of one nontrivial transaction;
+8. a final screenshot and automatic failure bundle.
 
-Trailgen supplies the reference rich interaction: rename a saved trail, enter
-its editor, acquire pin 1, drag it to another graph branch, prove a different
-route signature was presented within budget, save, and compare durable
-support points and leg geometry.
+Trailgen supplies the reference basis as four stories: discover and keep,
+refine deliberately, compare without lag, and draw from nothing. In
+particular, its refinement story acquires pin 1, drags it to another graph
+branch, proves a different route signature within budget, cancels without disk
+mutation, repeats, saves, and compares durable support points after restart.
+
+## Performance Law
+
+`PerformanceBudget` judges one reaction from the gesture’s final
+result-triggering input. Deliberate pointer transport, wheel pacing, tester
+dwell, and witness I/O must not dilate it. `CadenceBudget` judges the complete
+sustained gesture from the lossless frame journal and may constrain minimum
+samples, median cadence, p95 cadence, worst cadence, and p95 product frame
+work. Run these contracts against an optimized product binary and choose host
+or software graphics explicitly; never invent an instrumentation multiplier.
+
+The action must last long enough to produce a distribution. Lengthen the
+gesture when it yields too few samples; do not weaken the minimum merely to
+make a short trace pass.
 
 ## Skill Scaffold
 
@@ -92,3 +133,14 @@ An app-building skill may generate the conventional crate, script, feature,
 publisher lifecycle, and baseline boot scenario. It must require the author to
 name the semantic state, production budgets, rich interaction, and external
 oracle. Those are product decisions and must not be fabricated by middleware.
+
+## Design Defects
+
+No adoption may hide an unsupported behavior behind xdotool. Park the story and
+name the missing shared capability instead. The present defects are:
+
+- generic native input on the Wayland backend;
+- window move/resize, multi-window focus, native dialogs, and tray surfaces;
+- AccessKit selectors that can replace app-authored target anchors;
+- clipboard, IME, and text beyond the current Latin-1 injector;
+- a serializable selector/action timeline shared by tests and demo recording.

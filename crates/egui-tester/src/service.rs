@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    Error, JsonProbe, Result,
+    Error, FrameProbe, JsonProbe, Result,
     error::io,
     testbed::{DisplaySeal, Testbed},
 };
@@ -219,6 +219,8 @@ impl<'a> Application<'a> {
         let witness = command.witness.as_ref().map(|relative| WitnessSeal {
             host: testbed.host_path(relative),
             guest: Path::new(GUEST_ROOT).join(relative),
+            frame_host: testbed.host_path(relative.with_extension("frames")),
+            frame_guest: Path::new(GUEST_ROOT).join(relative.with_extension("frames")),
             launch: format!("{}-{ordinal}", testbed.id()),
         });
         if let Some(witness) = &witness {
@@ -230,6 +232,13 @@ impl<'a> Application<'a> {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => return Err(io("remove stale witness", &witness.host, err)),
+            }
+            match std::fs::remove_file(&witness.frame_host) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(io("remove stale frame journal", &witness.frame_host, err));
+                }
             }
         }
 
@@ -322,6 +331,14 @@ impl<'a> Application<'a> {
             detail: "launch the application with AppCommand::witness".to_owned(),
         })?;
         Ok(JsonProbe::sealed(&seal.host, &seal.launch))
+    }
+
+    pub fn frames(&self) -> Result<FrameProbe> {
+        let seal = self.witness.as_ref().ok_or_else(|| Error::Unsupported {
+            capability: "standard frame journal",
+            detail: "launch the application with AppCommand::witness".to_owned(),
+        })?;
+        Ok(FrameProbe::sealed(&seal.frame_host, &seal.launch))
     }
 
     #[must_use]
@@ -657,6 +674,10 @@ fn sealed_environment(
                 OsString::from(egui_tester_witness::LAUNCH_ENV),
                 OsString::from(&witness.launch),
             ),
+            (
+                OsString::from(egui_tester_witness::FRAMES_ENV),
+                witness.frame_guest.as_os_str().to_owned(),
+            ),
         ]);
     }
     env.extend(command.env.clone());
@@ -684,7 +705,7 @@ fn lavapipe_root() -> Result<PathBuf> {
 }
 
 fn validate_command(command: &AppCommand) -> Result<()> {
-    const RESERVED: [&str; 14] = [
+    const RESERVED: [&str; 15] = [
         "DISPLAY",
         "WAYLAND_DISPLAY",
         "XAUTHORITY",
@@ -699,6 +720,7 @@ fn validate_command(command: &AppCommand) -> Result<()> {
         "DBUS_SYSTEM_BUS_ADDRESS",
         egui_tester_witness::PATH_ENV,
         egui_tester_witness::LAUNCH_ENV,
+        egui_tester_witness::FRAMES_ENV,
     ];
     if let Some(detail) = command.violations.first() {
         return Err(Error::Containment {
@@ -900,6 +922,8 @@ impl UserBus {
 struct WitnessSeal {
     host: PathBuf,
     guest: PathBuf,
+    frame_host: PathBuf,
+    frame_guest: PathBuf,
     launch: String,
 }
 

@@ -30,6 +30,8 @@ use crate::{
 };
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
+const MODIFIER_GUARD: Duration = Duration::from_millis(32);
+const POINTER_DELIVERY_GUARD: Duration = Duration::from_millis(32);
 
 /// X11 mouse button.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +84,41 @@ pub struct Drag {
     pub steps: u16,
     /// Total time spent transporting the pointer after acquisition.
     pub duration: Duration,
+}
+
+/// Timed polyline traversed while one pointer button remains held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Stroke {
+    pub button: Button,
+    /// Time allowed for the application to acquire the pressed target.
+    pub press_duration: Duration,
+    pub steps_per_leg: u16,
+    pub leg_duration: Duration,
+}
+
+impl Default for Stroke {
+    fn default() -> Self {
+        Self {
+            button: Button::Primary,
+            press_duration: Duration::from_millis(32),
+            steps_per_leg: 8,
+            leg_duration: Duration::from_millis(120),
+        }
+    }
+}
+
+/// Timed wheel gesture; each tick reaches the product as a distinct input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Wheel {
+    pub tick_duration: Duration,
+}
+
+impl Default for Wheel {
+    fn default() -> Self {
+        Self {
+            tick_duration: Duration::from_millis(24),
+        }
+    }
 }
 
 impl Default for Drag {
@@ -301,15 +338,25 @@ impl X11Controller {
         modifiers: Modifiers,
     ) -> Result<ActionReceipt> {
         self.move_to(window, x, y)?;
-        let receipt = ActionReceipt::begin(format!("{modifiers:?} {button:?} click at ({x}, {y})"));
         let held = self.press_modifiers(modifiers)?;
+        self.flush("acquire click modifiers")?;
+        if !held.is_empty() {
+            thread::sleep(MODIFIER_GUARD);
+        }
+        let receipt = ActionReceipt::begin(format!("{modifiers:?} {button:?} click at ({x}, {y})"));
         let result = (|| {
             self.fake(BUTTON_PRESS_EVENT, button as u8, 0, 0)?;
-            self.fake(BUTTON_RELEASE_EVENT, button as u8, 0, 0)
+            self.fake(BUTTON_RELEASE_EVENT, button as u8, 0, 0)?;
+            self.flush("click pointer")?;
+            if !held.is_empty() {
+                thread::sleep(MODIFIER_GUARD);
+            }
+            Ok(())
         })();
         self.release_keycodes(&held);
+        let released = self.flush("release click modifiers");
         result?;
-        self.flush("click pointer").map(|()| receipt)
+        released.map(|()| receipt.finish())
     }
 
     pub fn button_down(
@@ -323,14 +370,14 @@ impl X11Controller {
         let receipt = ActionReceipt::begin(format!("{button:?} down at ({x}, {y})"));
         self.fake(BUTTON_PRESS_EVENT, button as u8, 0, 0)?;
         self.flush("press pointer button")?;
-        Ok(receipt)
+        Ok(receipt.finish())
     }
 
     pub fn button_up(&self, button: Button) -> Result<ActionReceipt> {
         let receipt = ActionReceipt::begin(format!("{button:?} up"));
         self.fake(BUTTON_RELEASE_EVENT, button as u8, 0, 0)?;
         self.flush("release pointer button")?;
-        Ok(receipt)
+        Ok(receipt.finish())
     }
 
     pub fn scroll(
@@ -340,14 +387,45 @@ impl X11Controller {
         y: i16,
         vertical_ticks: i32,
     ) -> Result<ActionReceipt> {
+        self.wheel(
+            window,
+            x,
+            y,
+            vertical_ticks,
+            Wheel {
+                tick_duration: Duration::ZERO,
+            },
+        )
+    }
+
+    pub fn wheel(
+        &self,
+        window: &Window,
+        x: i16,
+        y: i16,
+        vertical_ticks: i32,
+        policy: Wheel,
+    ) -> Result<ActionReceipt> {
         self.move_to(window, x, y)?;
-        let receipt = ActionReceipt::begin(format!("scroll {vertical_ticks} ticks at ({x}, {y})"));
+        let mut receipt =
+            ActionReceipt::begin(format!("scroll {vertical_ticks} ticks at ({x}, {y})"));
         let detail = if vertical_ticks < 0 { 4 } else { 5 };
-        for _ in 0..vertical_ticks.unsigned_abs() {
+        let count = vertical_ticks.unsigned_abs();
+        for tick in 0..count {
+            if tick + 1 == count {
+                receipt = receipt.trigger();
+            }
             self.fake(BUTTON_PRESS_EVENT, detail, 0, 0)?;
             self.fake(BUTTON_RELEASE_EVENT, detail, 0, 0)?;
+            self.flush("scroll pointer")?;
+            if tick + 1 < count && !policy.tick_duration.is_zero() {
+                thread::sleep(policy.tick_duration);
+            }
         }
-        self.flush("scroll pointer")?;
+        let receipt = receipt.finish();
+        if count > 0 {
+            thread::sleep(POINTER_DELIVERY_GUARD);
+        }
         Ok(receipt)
     }
 
@@ -373,7 +451,7 @@ impl X11Controller {
         self.release_keycodes(&held);
         result?;
         self.flush("send key")?;
-        Ok(receipt)
+        Ok(receipt.finish())
     }
 
     pub fn key_down(&self, key: Key) -> Result<ActionReceipt> {
@@ -387,7 +465,7 @@ impl X11Controller {
         let receipt = ActionReceipt::begin(format!("{key:?} down"));
         self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
         self.flush("press key")?;
-        Ok(receipt)
+        Ok(receipt.finish())
     }
 
     pub fn key_up(&self, key: Key) -> Result<ActionReceipt> {
@@ -401,15 +479,20 @@ impl X11Controller {
         let receipt = ActionReceipt::begin(format!("{key:?} up"));
         self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)?;
         self.flush("release key")?;
-        Ok(receipt)
+        Ok(receipt.finish())
     }
 
     pub fn type_text(&self, text: &str) -> Result<ActionReceipt> {
-        let receipt = ActionReceipt::begin(format!("type {} character(s)", text.chars().count()));
-        for character in text.chars() {
+        let mut receipt =
+            ActionReceipt::begin(format!("type {} character(s)", text.chars().count()));
+        let mut characters = text.chars().peekable();
+        while let Some(character) = characters.next() {
+            if characters.peek().is_none() {
+                receipt = receipt.trigger();
+            }
             let _receipt = self.key(Key::Character(character))?;
         }
-        Ok(receipt)
+        Ok(receipt.finish())
     }
 
     pub fn drag(
@@ -419,53 +502,86 @@ impl X11Controller {
         to: (i16, i16),
         policy: Drag,
     ) -> Result<ActionReceipt> {
-        if policy.steps == 0 {
+        self.stroke(
+            window,
+            &[from, to],
+            Stroke {
+                button: policy.button,
+                press_duration: policy.press_duration,
+                steps_per_leg: policy.steps,
+                leg_duration: policy.duration,
+            },
+        )
+    }
+
+    pub fn stroke(
+        &self,
+        window: &Window,
+        knots: &[(i16, i16)],
+        policy: Stroke,
+    ) -> Result<ActionReceipt> {
+        if knots.len() < 2 {
             return Err(Error::X11 {
-                operation: "drag pointer",
-                detail: "drag policy requires at least one motion step".to_owned(),
+                operation: "stroke pointer",
+                detail: "pointer stroke requires at least two knots".to_owned(),
             });
         }
+        if policy.steps_per_leg == 0 {
+            return Err(Error::X11 {
+                operation: "stroke pointer",
+                detail: "pointer stroke requires at least one step per leg".to_owned(),
+            });
+        }
+        let from = knots[0];
+        let to = *knots.last().unwrap_or(&from);
         self.move_to(window, from.0, from.1)?;
+        let mut receipt = ActionReceipt::begin(format!(
+            "{:?} stroke {} knot(s) ({}, {}) → ({}, {})",
+            policy.button,
+            knots.len(),
+            from.0,
+            from.1,
+            to.0,
+            to.1
+        ));
         self.fake(BUTTON_PRESS_EVENT, policy.button as u8, 0, 0)?;
-        self.flush("begin pointer drag")?;
+        self.flush("begin pointer stroke")?;
         if !policy.press_duration.is_zero() {
             thread::sleep(policy.press_duration);
         }
-        let pause = policy.duration / u32::from(policy.steps);
-        let mut receipt = None;
-        for step in 1..=policy.steps {
-            if step == policy.steps {
-                receipt = Some(ActionReceipt::begin(format!(
-                    "{:?} drag commit ({}, {}) → ({}, {})",
-                    policy.button, from.0, from.1, to.0, to.1
-                )));
-            }
-            let fraction = f64::from(step) / f64::from(policy.steps);
-            let x = f64::from(from.0)
-                .mul_add(1.0 - fraction, f64::from(to.0) * fraction)
-                .round() as i16;
-            let y = f64::from(from.1)
-                .mul_add(1.0 - fraction, f64::from(to.1) * fraction)
-                .round() as i16;
-            if let Err(err) = self.move_to(window, x, y) {
-                let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
-                let _flushed = self.flush("abort pointer drag");
-                return Err(err);
-            }
-            if step < policy.steps && !pause.is_zero() {
-                thread::sleep(pause);
+        let pause = policy.leg_duration / u32::from(policy.steps_per_leg);
+        for (leg_index, leg) in knots.windows(2).enumerate() {
+            let [from, to] = leg else {
+                continue;
+            };
+            for step in 1..=policy.steps_per_leg {
+                if leg_index + 2 == knots.len() && step == policy.steps_per_leg {
+                    receipt = receipt.trigger();
+                }
+                let fraction = f64::from(step) / f64::from(policy.steps_per_leg);
+                let x = f64::from(from.0)
+                    .mul_add(1.0 - fraction, f64::from(to.0) * fraction)
+                    .round() as i16;
+                let y = f64::from(from.1)
+                    .mul_add(1.0 - fraction, f64::from(to.1) * fraction)
+                    .round() as i16;
+                if let Err(err) = self.move_to(window, x, y) {
+                    let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
+                    let _flushed = self.flush("abort pointer stroke");
+                    return Err(err);
+                }
+                if step < policy.steps_per_leg && !pause.is_zero() {
+                    thread::sleep(pause);
+                }
             }
         }
         if let Err(err) = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0) {
             let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
-            let _flushed = self.flush("recover pointer drag release");
+            let _flushed = self.flush("recover pointer stroke release");
             return Err(err);
         }
-        self.flush("finish pointer drag")?;
-        receipt.ok_or_else(|| Error::X11 {
-            operation: "drag pointer",
-            detail: "drag produced no commit receipt".to_owned(),
-        })
+        self.flush("finish pointer stroke")?;
+        Ok(receipt.finish())
     }
 
     pub fn capture(&self, window: &Window) -> Result<Frame> {
@@ -757,6 +873,7 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         self.app.ensure_running("pointer motion")?;
         let receipt = ActionReceipt::begin(format!("pointer motion to ({x}, {y})"));
         self.controller.move_to(&self.window, x, y)?;
+        let receipt = receipt.finish();
         self.record(&receipt)?;
         Ok(receipt)
     }
@@ -829,9 +946,23 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         Ok(receipt)
     }
 
+    pub fn stroke(&self, knots: &[(i16, i16)], policy: Stroke) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer stroke")?;
+        let receipt = self.controller.stroke(&self.window, knots, policy)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
     pub fn scroll(&self, x: i16, y: i16, ticks: i32) -> Result<ActionReceipt> {
         self.app.ensure_running("pointer scroll")?;
         let receipt = self.controller.scroll(&self.window, x, y, ticks)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    pub fn wheel(&self, x: i16, y: i16, ticks: i32, policy: Wheel) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer wheel gesture")?;
+        let receipt = self.controller.wheel(&self.window, x, y, ticks, policy)?;
         self.record(&receipt)?;
         Ok(receipt)
     }
@@ -875,16 +1006,21 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
     }
 
     fn record(&self, receipt: &ActionReceipt) -> Result<()> {
-        self.note(receipt.action(), receipt.started_ns())
+        self.write_transcript(&serde_json::json!({
+            "gesture_started_ns": receipt.gesture_started_ns(),
+            "triggered_ns": receipt.triggered_ns(),
+            "completed_ns": receipt.completed_ns(),
+            "action": receipt.action(),
+        }))
     }
 
     fn note(&self, action: &str, at_ns: u64) -> Result<()> {
+        self.write_transcript(&serde_json::json!({"at_ns": at_ns, "action": action}))
+    }
+
+    fn write_transcript(&self, entry: &serde_json::Value) -> Result<()> {
         let mut transcript = self.transcript.borrow_mut();
-        serde_json::to_writer(
-            &mut *transcript,
-            &serde_json::json!({"at_ns": at_ns, "action": action}),
-        )
-        .map_err(|err| Error::X11 {
+        serde_json::to_writer(&mut *transcript, entry).map_err(|err| Error::X11 {
             operation: "write action transcript",
             detail: err.to_string(),
         })?;

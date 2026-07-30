@@ -75,29 +75,44 @@ states a predicate:
 
 The standard witness is published only after its product frame is presented.
 Its semantic state and anchors must describe one coherent egui pass. A
-transition predicate should therefore require both the new state and a control
-that belongs to that state; this prevents a late-pass state mutation from
-making preceding-layout anchors appear current.
+pass plugin clears anchors before every egui pass, including replacement passes
+requested through `Context::request_discard`. A transition predicate should
+still require both the new state and a control that belongs to that state.
 
 A witness transition still must not substitute for a product verdict. It may
 release a subsequent pixel or external-oracle wait.
 
 ## Performance
 
-Every native input operation may return an `ActionReceipt` stamped immediately
-before XTEST injection. A standard witness carries two timestamps from the
-same `CLOCK_MONOTONIC` epoch:
+Every native input operation may return an `ActionReceipt` with three
+`CLOCK_MONOTONIC` instants: gesture start, the final input that can satisfy its
+postcondition, and injection completion. A reaction budget begins at the
+trigger; a cadence trace spans the gesture. Deliberate pointer transport and
+wheel pacing therefore enter cadence evidence without taxing product reaction
+latency.
 
-1. `observed_ns`, captured after product-state work and before witness work;
-2. `presented_ns`, captured immediately after the corresponding real frame is
-   presented.
+A standard witness and its lossless frame journal carry four timestamps from
+the same epoch:
+
+1. `begun_ns`, captured at product frame entry;
+2. `observed_ns`, captured after product-state work;
+3. `presented_ns`, captured immediately after the corresponding real frame is
+   presented;
+4. `retired_ns`, captured after post-present witness publication.
 
 The adapter collects anchors, constructs test-only state, serializes JSON, and
-atomically publishes only after both timestamps exist. Harness polling,
+atomically publishes only after presentation. Harness polling,
 screenshots, and filesystem latency are therefore outside both verdicts.
 `PerformanceBudget` defaults to observation and may opt into presentation.
 Its functional timeout bounds a missing result but never dilates the
 production threshold.
+
+`FrameProbe::trace` does not mistake an in-flight presentation for a
+post-gesture frame: its causal fence requires a frame begun after action
+completion. `CadenceBudget` subtracts each preceding frame’s
+`presented_ns..retired_ns` witness tax before computing p50, p95, and worst
+cadence; p95 frame work remains the unadjusted
+`begun_ns..presented_ns` product interval.
 
 Run performance acceptance against an optimized product binary. Software
 graphics is a conservative presentation environment; use
