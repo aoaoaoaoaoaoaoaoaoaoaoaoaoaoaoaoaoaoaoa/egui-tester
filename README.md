@@ -13,8 +13,8 @@ X11 is the complete, release-tested vertical:
 - authenticated private Xvfb, never the caller's `DISPLAY`;
 - XTEST clicks, held-button drags, strokes, wheels, modifiers, function keys,
   and Latin-1 keyboard input;
-- exact window discovery, focus, RGBA capture, regional pixel comparison, and
-  PNG artifacts;
+- exact window discovery, focus, RGBA capture, tolerant regional pixel
+  comparison, and PNG artifacts;
 - a private XDG tree, mount and network namespaces, a transient user-service
   cgroup, runtime limits, and complete descendant teardown;
 - launch-sealed semantic and frame journals through `egui-tester-witness`;
@@ -119,10 +119,12 @@ drop(submitted);
 # Ok::<(), egui_tester::Error>(())
 ```
 
-The application-side publisher is documented in
-[Application Adoption](docs/adoption.md). Product Targets may be ordinary
-enums implementing `Display`; the contract crate need not depend on the
-tester.
+Rendered oracles compare bounded semantic regions with explicit tolerance;
+whole-window stillness and exact snapshots are intentionally absent because
+lawful product animation remains enabled. The application-side publisher is
+documented in [Application Adoption](docs/adoption.md). Product Targets may be
+ordinary enums implementing `Display`; the contract crate need not depend on
+the tester.
 
 ## Verification
 

@@ -2,8 +2,6 @@ use std::{
     fs::File,
     io::{BufReader, BufWriter},
     path::Path,
-    thread,
-    time::{Duration, Instant},
 };
 
 use crate::{Anchor, Error, Result, error::io};
@@ -56,7 +54,10 @@ impl PixelRegion {
 }
 
 /// One observed RGBA frame.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Frames deliberately have no exact equality: rendered evidence must declare
+/// a bounded region and tolerance through [`Self::difference_region`].
+#[derive(Clone, Debug)]
 pub struct Frame {
     width: u32,
     height: u32,
@@ -231,59 +232,6 @@ impl Frame {
             }
         };
         Ok(Self::new(info.width, info.height, rgba))
-    }
-}
-
-/// Pixel-quiescence policy.
-#[derive(Clone, Copy, Debug)]
-pub struct Quiet {
-    pub timeout: Duration,
-    pub sample_every: Duration,
-    pub consecutive: u8,
-    pub changed_pixel_fraction: f64,
-    pub channel_slop: u8,
-}
-
-impl Default for Quiet {
-    fn default() -> Self {
-        Self {
-            timeout: Duration::from_secs(5),
-            sample_every: Duration::from_millis(50),
-            consecutive: 3,
-            changed_pixel_fraction: 0.000_5,
-            channel_slop: 2,
-        }
-    }
-}
-
-pub(crate) fn wait_quiet(
-    mut capture: impl FnMut() -> Result<Frame>,
-    policy: Quiet,
-) -> Result<Frame> {
-    let deadline = Instant::now() + policy.timeout;
-    let mut prior = capture()?;
-    let mut quiet = 0_u8;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(Error::Timeout {
-                waiting: format!(
-                    "pixels to remain within {:.5} changed fraction for {} samples",
-                    policy.changed_pixel_fraction, policy.consecutive
-                ),
-                timeout: policy.timeout,
-            });
-        }
-        thread::sleep(policy.sample_every);
-        let next = capture()?;
-        if prior.difference(&next, policy.channel_slop)? <= policy.changed_pixel_fraction {
-            quiet = quiet.saturating_add(1);
-            if quiet >= policy.consecutive {
-                return Ok(next);
-            }
-        } else {
-            quiet = 0;
-        }
-        prior = next;
     }
 }
 

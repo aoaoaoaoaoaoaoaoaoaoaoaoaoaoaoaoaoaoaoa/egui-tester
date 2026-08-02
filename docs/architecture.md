@@ -104,8 +104,13 @@ are implementation detail, never choreography. A caller may await:
 - a target or state predicate in a complete observation;
 - projection stability for a declared quiet interval;
 - a private durable effect;
-- changed pixels in a named region;
-- bounded pixel quiescence.
+- changed pixels in a named region.
+
+Whole-window pixel quiescence is not a synchronization primitive. Carets,
+water, loading motion, and other lawful animation may continue after the
+requested state is ready. Synchronize through a presented semantic predicate,
+then judge a bounded region with a tolerant feature or change predicate, or use
+an external effect. Production motion remains enabled during acceptance.
 
 A `Reaction` considers only frames newer than its prior cursor and with product
 timestamps after the gesture trigger. This is temporal eligibility, not proof

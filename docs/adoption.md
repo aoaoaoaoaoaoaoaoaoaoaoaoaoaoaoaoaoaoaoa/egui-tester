@@ -130,6 +130,11 @@ After launch, product files are read through `read_private` or exported through
 names beneath its writable tree. Regional pixel assertions should bind to a
 witnessed Target with `PixelRegion::anchor`, then compare captured frames.
 
+Do not use exact snapshots or whole-window stillness as readiness oracles.
+Ambient product motion remains live in acceptance builds. Fence the relevant
+presented state through the witness, then inspect a named region with tolerant
+pixel features or relative change, or prefer a durable external effect.
+
 Witnesses and artifacts need a disclosure budget. Publish only state necessary
 to synchronize stories, and retain only diagnostics that explain a failure.
 Credentials, ambient user data, and unrelated model state have no place in

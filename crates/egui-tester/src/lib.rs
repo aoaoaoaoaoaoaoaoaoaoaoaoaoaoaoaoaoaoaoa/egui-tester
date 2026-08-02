@@ -19,7 +19,7 @@ mod x11;
 pub use condition::{Condition, Field, field};
 pub use error::{Error, Result};
 pub use frames::{CadenceBudget, CadenceReport, FrameProbe, FrameSample, FrameTrace};
-pub use pixels::{Frame, PixelRegion, Quiet};
+pub use pixels::{Frame, PixelRegion};
 pub use probe::{Anchor, LegacyJsonProbe, LegacyProbe, LegacyProbeFrame, Probe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
 pub use story::{Reaction, Story, demand};

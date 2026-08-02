@@ -26,10 +26,7 @@ use x11rb::{
 };
 use xkeysym::Keysym;
 
-use crate::{
-    ActionReceipt, Application, Error, Frame, PixelRegion, Probe, Quiet, Result, Testbed,
-    pixels::wait_quiet,
-};
+use crate::{ActionReceipt, Application, Error, Frame, PixelRegion, Probe, Result, Testbed};
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
 const MODIFIER_GUARD: Duration = Duration::from_millis(32);
@@ -648,21 +645,6 @@ impl X11Controller {
         ))
     }
 
-    pub fn wait_quiet(
-        &self,
-        app: &Application<'_>,
-        window: &Window,
-        policy: Quiet,
-    ) -> Result<Frame> {
-        wait_quiet(
-            || {
-                app.ensure_running("window pixels to become quiet")?;
-                self.capture(window)
-            },
-            policy,
-        )
-    }
-
     pub fn wait_changed(
         &self,
         app: &Application<'_>,
@@ -1059,10 +1041,6 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
             channel_slop,
             timeout,
         ))
-    }
-
-    pub fn wait_quiet(&self, policy: Quiet) -> Result<Frame> {
-        self.remember_result(self.controller.wait_quiet(self.app, &self.window, policy))
     }
 
     fn record(&self, receipt: &ActionReceipt) -> Result<()> {

@@ -2,7 +2,7 @@ use std::{fs, time::Duration};
 
 use eframe as _;
 use egui_tester::{
-    AppCommand, Button, Drag, Key, LegacyJsonProbe, Modifiers, Quiet, Testbed, WindowQuery,
+    AppCommand, Button, Drag, Key, LegacyJsonProbe, Modifiers, Testbed, WindowQuery,
 };
 use serde as _;
 use serde_json as _;
@@ -36,9 +36,7 @@ fn drives_real_input_and_observes_pixels() {
     let increment = probe
         .wait_anchor(&app, "increment", Duration::from_secs(5))
         .expect("locate increment button");
-    let before = session
-        .wait_quiet(Quiet::default())
-        .expect("initial pixels settle");
+    let before = session.capture().expect("capture initial pixels");
     let (x, y) = increment.center();
     let _receipt = session
         .click(x, y, Button::Primary)
@@ -52,8 +50,8 @@ fn drives_real_input_and_observes_pixels() {
         )
         .expect("observe incremented frame");
     let counted = session
-        .wait_quiet(Quiet::default())
-        .expect("incremented pixels settle");
+        .wait_changed(&before, 0.000_01, 2, Duration::from_secs(3))
+        .expect("count reaches product pixels");
     assert!(
         before
             .difference(&counted, 2)
@@ -78,8 +76,8 @@ fn drives_real_input_and_observes_pixels() {
         )
         .expect("observe violet frame");
     let violet = session
-        .wait_quiet(Quiet::default())
-        .expect("violet pixels settle");
+        .wait_changed(&counted, 0.5, 2, Duration::from_secs(3))
+        .expect("violet background reaches product pixels");
     assert!(
         counted
             .difference(&violet, 2)

@@ -7,8 +7,7 @@ use std::{
 };
 
 use egui_tester::{
-    AppCommand, Backend, Button, Error, LegacyJsonProbe, Quiet, Result, Testbed, TestbedBuilder,
-    X11Config,
+    AppCommand, Backend, Button, Error, LegacyJsonProbe, Result, Testbed, TestbedBuilder, X11Config,
 };
 
 const APP: &str = "adequate_booru_viewer";
@@ -37,11 +36,11 @@ fn main() -> Result<()> {
     x11.focus(&window)?;
     let mut probe = LegacyJsonProbe::new(&probe_path);
     let recess = probe.wait_anchor(&app, "recess:ui", Duration::from_secs(10))?;
-    let closed = x11.wait_quiet(&app, &window, Quiet::default())?;
+    let closed = x11.capture(&window)?;
     let (x, y) = recess.center();
     let _receipt = x11.click(&window, x, y, Button::Primary)?;
     let dry = probe.wait_anchor(&app, "water:dry", Duration::from_secs(5))?;
-    let open = x11.wait_quiet(&app, &window, Quiet::default())?;
+    let open = x11.wait_changed(&app, &window, &closed, 0.001, 2, Duration::from_secs(5))?;
     demand(
         closed.difference(&open, 2)? > 0.001,
         "opening the UI recess did not alter rendered pixels",
@@ -101,14 +100,6 @@ fn main() -> Result<()> {
         Duration::from_secs(3),
         "booru water mode to return to dry",
         |frame| state_is(frame, "water", "dry"),
-    )?;
-    let _settled = x11.wait_quiet(
-        &restarted,
-        &window,
-        Quiet {
-            timeout: Duration::from_secs(8),
-            ..Quiet::default()
-        },
     )?;
     restarted.terminate()?;
     println!("booru smoke passed under {}", testbed.id());
