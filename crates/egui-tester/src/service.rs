@@ -238,7 +238,6 @@ impl<'a> Application<'a> {
         let _command = systemd
             .args([
                 "--user",
-                "--quiet",
                 "--remain-after-exit",
                 "--service-type=exec",
                 "--unit",
