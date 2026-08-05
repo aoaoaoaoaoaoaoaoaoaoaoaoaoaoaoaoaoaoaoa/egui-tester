@@ -16,9 +16,9 @@ use x11rb::{
     image::Image,
     protocol::{
         xproto::{
-            Atom, AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConfigureWindowAux,
-            ConnectionExt as _, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
-            MOTION_NOTIFY_EVENT, MapState, Window as WindowId,
+            Atom, AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent,
+            ConfigureWindowAux, ConnectionExt as _, EventMask, InputFocus, KEY_PRESS_EVENT,
+            KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, MapState, Window as WindowId,
         },
         xtest::ConnectionExt as _,
     },
@@ -317,6 +317,21 @@ impl X11Controller {
             .check()
             .map_err(|err| x11("focus window", err))?;
         self.flush("focus window")
+    }
+
+    /// Deliver the ICCCM window-manager close protocol to one client window.
+    pub fn close(&self, window: &Window) -> Result<ActionReceipt> {
+        let (protocols, close) = (self.atom("WM_PROTOCOLS")?, self.atom("WM_DELETE_WINDOW")?);
+        let receipt = ActionReceipt::begin(format!("close window `{}`", window.title));
+        let event =
+            ClientMessageEvent::new(32, window.id, protocols, [close, CURRENT_TIME, 0, 0, 0]);
+        self.connection
+            .send_event(false, window.id, EventMask::NO_EVENT, event)
+            .map_err(|err| x11("request window close", err))?
+            .check()
+            .map_err(|err| x11("request window close", err))?;
+        self.flush("request window close")?;
+        Ok(receipt.trigger().finish())
     }
 
     pub fn move_to(&self, window: &Window, x: i16, y: i16) -> Result<()> {
@@ -881,6 +896,13 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         self.app.ensure_running("window focus")?;
         self.controller.focus(&self.window)?;
         self.note("focus", egui_tester_witness::monotonic_ns())
+    }
+
+    pub fn close(&self) -> Result<ActionReceipt> {
+        self.app.ensure_running("window close")?;
+        let receipt = self.controller.close(&self.window)?;
+        self.record(&receipt)?;
+        Ok(receipt)
     }
 
     pub fn click(&self, x: i16, y: i16, button: Button) -> Result<ActionReceipt> {

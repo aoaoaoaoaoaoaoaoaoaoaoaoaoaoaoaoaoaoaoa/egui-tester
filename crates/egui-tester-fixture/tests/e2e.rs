@@ -165,7 +165,12 @@ fn drives_real_input_and_observes_pixels() {
             },
         )
         .expect("observe pointer drag");
-    app.terminate().expect("terminate fixture cgroup");
+    let _closed = session.close().expect("request native window close");
+    let exit = app
+        .wait(Duration::from_secs(3))
+        .expect("fixture to honor native window close");
+    assert!(exit.success(), "fixture close failed: {exit:#?}");
+    app.terminate().expect("collect fixture cgroup");
     drop(app);
     drop(testbed);
     assert!(
