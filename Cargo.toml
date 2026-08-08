@@ -1,6 +1,5 @@
 [workspace]
 members = [
-  "crates/booru-acceptance",
   "crates/egui-tester",
   "crates/egui-tester-doctor",
   "crates/egui-tester-fixture",
@@ -107,7 +106,15 @@ clippy_command = [
   "--all-targets",
   "--all-features",
 ]
-test_command = ["cargo", "test", "--workspace", "--all-targets", "--all-features"]
+test_command = [
+  "cargo",
+  "test",
+  "--workspace",
+  "--exclude",
+  "egui-tester-fixture",
+  "--all-targets",
+  "--all-features",
+]
 doc_command = ["cargo", "doc", "--workspace", "--all-features", "--no-deps"]
 canonicalize_commands = [
   [

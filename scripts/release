@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+die() {
+    printf 'release refused: %s\n' "$1" >&2
+    exit 1
+}
+
+version=${1:-}
+mode=${2:-check}
+[ -n "$version" ] || die 'usage: scripts/release VERSION [check|publish]'
+case "$version" in
+    *[!0-9.]*|'') die "invalid version: $version" ;;
+esac
+case "$mode" in
+    check|publish) ;;
+    *) die "invalid mode: $mode" ;;
+esac
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+[ "$(git branch --show-current)" = main ] || die 'release checkout is not main'
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die 'tracked worktree is dirty'
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
+    die 'HEAD is not the pushed origin/main commit'
+grep -Fqx "version = \"$version\"" Cargo.toml ||
+    die "Cargo.toml does not declare workspace version $version"
+[ "$(git tag --points-at HEAD)" = "v$version" ] ||
+    die "v$version does not uniquely tag HEAD"
+
+./check.py verify
+scripts/audit
+scripts/test-x11
+cargo package --locked --package egui-tester-witness
+cargo package --locked --package egui-tester
+
+if [ "$mode" = publish ]; then
+    cargo publish --locked --package egui-tester
+else
+    printf 'release candidate v%s is clean and packaged; publication was not requested\n' "$version"
+fi

@@ -130,9 +130,15 @@ the tester.
 
 ```console
 ./check.py verify
-cargo test -p egui-tester-fixture --test e2e
-cargo run -p egui-tester-doctor
+scripts/audit
+scripts/test-x11
 ```
+
+The source gate deliberately excludes the host fixture. `scripts/test-x11`
+owns the release-tested X11 containment coordinate and runs both the doctor and
+the black-box fixture. CI schedules those same three evidence units and checks
+the publishable crates; it does not imply Wayland parity or portability beyond
+the documented X11 host.
 
 `egui-tester-doctor` verifies the canonical user manager, raises one isolated
 X11 universe, then destroys it. Trailgen is the reference full adoption:

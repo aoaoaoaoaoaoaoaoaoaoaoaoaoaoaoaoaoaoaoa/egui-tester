@@ -16,9 +16,9 @@ use x11rb::{
     image::Image,
     protocol::{
         xproto::{
-            Atom, AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent,
-            ConfigureWindowAux, ConnectionExt as _, EventMask, InputFocus, KEY_PRESS_EVENT,
-            KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, MapState, Window as WindowId,
+            Atom, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent, ConfigureWindowAux,
+            ConnectionExt as _, EventMask, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+            MOTION_NOTIFY_EVENT, Window as WindowId,
         },
         xtest::ConnectionExt as _,
     },
@@ -27,6 +27,8 @@ use x11rb::{
 use xkeysym::Keysym;
 
 use crate::{ActionReceipt, Application, Error, Frame, PixelRegion, Probe, Result, Testbed};
+
+mod window;
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
 const MODIFIER_GUARD: Duration = Duration::from_millis(32);
@@ -283,13 +285,14 @@ impl X11Controller {
             let tree = self
                 .connection
                 .query_tree(parent)
-                .map_err(|err| x11("query window tree", err))?
-                .reply()
                 .map_err(|err| x11("query window tree", err))?;
+            let Some(tree) = window::reply("query window tree", tree.reply())? else {
+                continue;
+            };
             for child in tree.children {
-                if let Some(title) = self.window_title(child, net_name, utf8)?
+                if let Some(title) = window::title(&self.connection, child, net_name, utf8)?
                     && query.matches(&title)
-                    && self.window_viewable(child)?
+                    && window::viewable(&self.connection, child)?
                 {
                     matches.push(Window { id: child, title });
                 }
@@ -726,37 +729,6 @@ impl X11Controller {
             .reply()
             .map(|reply| reply.atom)
             .map_err(|err| x11("intern atom", err))
-    }
-
-    fn window_title(&self, window: WindowId, net_name: Atom, utf8: Atom) -> Result<Option<String>> {
-        for (property, kind) in [
-            (net_name, utf8),
-            (AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()),
-        ] {
-            let reply = self
-                .connection
-                .get_property(false, window, property, kind, 0, 4096)
-                .map_err(|err| x11("read window title", err))?
-                .reply()
-                .map_err(|err| x11("read window title", err))?;
-            if !reply.value.is_empty() {
-                return Ok(Some(
-                    String::from_utf8_lossy(&reply.value)
-                        .trim_end_matches('\0')
-                        .to_owned(),
-                ));
-            }
-        }
-        Ok(None)
-    }
-
-    fn window_viewable(&self, window: WindowId) -> Result<bool> {
-        self.connection
-            .get_window_attributes(window)
-            .map_err(|err| x11("inspect window visibility", err))?
-            .reply()
-            .map(|attributes| attributes.map_state == MapState::VIEWABLE)
-            .map_err(|err| x11("inspect window visibility", err))
     }
 
     fn window_origin(&self, window: &Window) -> Result<(i16, i16)> {
