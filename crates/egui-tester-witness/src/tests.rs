@@ -1,4 +1,12 @@
 use super::*;
+use std::time::Duration;
+
+#[test]
+fn host_clock_advances() {
+    let before = monotonic_ns();
+    thread::sleep(Duration::from_millis(2));
+    assert!(monotonic_ns() > before);
+}
 
 #[test]
 fn logical_rectangles_become_physical() {

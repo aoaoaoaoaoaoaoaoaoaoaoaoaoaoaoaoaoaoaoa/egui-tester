@@ -6,6 +6,18 @@ die() {
     exit 1
 }
 
+await_registry() {
+    crate=$1
+    release=$2
+    attempts=0
+    until cargo info "$crate@$release" >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 36 ] ||
+            die "$crate $release did not reach the registry index"
+        sleep 5
+    done
+}
+
 version=${1:-}
 mode=${2:-check}
 [ -n "$version" ] || die 'usage: scripts/release VERSION [check|publish]'
@@ -21,13 +33,13 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 [ "$(git branch --show-current)" = main ] || die 'release checkout is not main'
-[ -z "$(git status --porcelain --untracked-files=no)" ] || die 'tracked worktree is dirty'
+[ -z "$(git status --porcelain)" ] || die 'worktree is dirty'
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
     die 'HEAD is not the pushed origin/main commit'
 grep -Fqx "version = \"$version\"" Cargo.toml ||
     die "Cargo.toml does not declare workspace version $version"
-[ "$(git tag --points-at HEAD)" = "v$version" ] ||
-    die "v$version does not uniquely tag HEAD"
+git tag --points-at HEAD | grep -Fqx "v$version" || die "v$version does not tag HEAD"
+git tag -v "v$version" >/dev/null 2>&1 || die "v$version is not a valid signed tag"
 
 ./check.py verify
 scripts/audit
@@ -36,6 +48,8 @@ cargo package --locked --package egui-tester-witness
 cargo package --locked --package egui-tester
 
 if [ "$mode" = publish ]; then
+    cargo publish --locked --package egui-tester-witness
+    await_registry egui-tester-witness "$version"
     cargo publish --locked --package egui-tester
 else
     printf 'release candidate v%s is clean and packaged; publication was not requested\n' "$version"

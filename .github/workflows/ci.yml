@@ -47,6 +47,25 @@ jobs:
       - name: Audit locked dependencies
         run: scripts/audit
 
+  witness-hosts:
+    name: Witness · ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: macOS arm64
+            runner: macos-15
+          - host: Windows x86_64
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Rust 1.96
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Prove the native witness clock
+        run: cargo test --locked --package egui-tester-witness --all-targets --all-features
+
   x11:
     name: X11 containment contract
     runs-on: ubuntu-24.04
