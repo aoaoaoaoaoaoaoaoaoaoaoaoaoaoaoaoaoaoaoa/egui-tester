@@ -25,7 +25,8 @@ pub use pixels::{Frame, PixelRegion};
 pub use probe::{Anchor, LegacyJsonProbe, LegacyProbe, LegacyProbeFrame, Probe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
 pub use story::{
-    Reaction, Silent, Story, StoryCue, StoryEvent, StoryFact, StoryObserver, StorySurface, demand,
+    Reaction, Silent, Story, StoryCue, StoryEvent, StoryFact, StoryObserver, StorySurface,
+    StoryTempo, demand,
 };
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
 pub use timing::{ActionReceipt, ReactionBudget, ReactionEndpoint, Timed};

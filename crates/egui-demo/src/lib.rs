@@ -16,12 +16,12 @@ use std::{
 
 use egui_tester::{
     Anchor, Error, Frame, Result, StoryCue, StoryEvent, StoryFact, StoryObserver, StorySurface,
-    demand,
+    StoryTempo, demand,
 };
 use font8x8::{BASIC_FONTS, UnicodeFonts as _};
 use serde::Serialize;
 
-const TRACE_SCHEMA: &str = "egui-demo.trace/2";
+const TRACE_SCHEMA: &str = "egui-demo.trace/3";
 const TARGET_FLIGHT: Duration = Duration::from_millis(220);
 const TARGET_REST: Duration = Duration::from_millis(100);
 const ACTION_REST: Duration = Duration::from_millis(160);
@@ -90,6 +90,7 @@ pub struct Recorder {
     encoder: Option<Encoder>,
     pointer: Option<Point>,
     target: Option<Rect>,
+    tempo: StoryTempo,
     begun: Instant,
     frames_written: u64,
     sealed: bool,
@@ -122,6 +123,7 @@ impl Recorder {
             encoder: None,
             pointer: None,
             target: None,
+            tempo: StoryTempo::STANDARD,
             begun: Instant::now(),
             frames_written: 0,
             sealed: false,
@@ -165,11 +167,13 @@ impl Recorder {
         let destination = Point::from(pointer);
         let origin = self.pointer.unwrap_or(destination);
         self.target = anchor.map(|anchor| Rect::from(anchor.rect));
-        self.live_interval(surface, TARGET_FLIGHT, |step, steps| Scene::Target {
-            pointer: origin.lerp(destination, step + 1, steps),
+        self.live_interval(surface, self.beat(TARGET_FLIGHT), |step, steps| {
+            Scene::Target {
+                pointer: origin.lerp(destination, step + 1, steps),
+            }
         })?;
         self.pointer = Some(destination);
-        self.live_interval(surface, TARGET_REST, |_, _| Scene::Target {
+        self.live_interval(surface, self.beat(TARGET_REST), |_, _| Scene::Target {
             pointer: destination,
         })
     }
@@ -179,16 +183,20 @@ impl Recorder {
             self.pointer = Some(Point::from(pointer));
         }
         let pointer = self.pointer;
-        self.live_interval(surface, ACTION_REST, |phase, phases| Scene::Action {
-            pointer,
-            phase,
-            phases,
+        self.live_interval(surface, self.beat(ACTION_REST), |phase, phases| {
+            Scene::Action {
+                pointer,
+                phase,
+                phases,
+            }
         })
     }
 
     fn observation(&mut self, surface: StorySurface<'_>) -> Result<()> {
         let pointer = self.pointer;
-        self.live_interval(surface, OBSERVATION_REST, |_, _| Scene::Settled { pointer })
+        self.live_interval(surface, self.beat(OBSERVATION_REST), |_, _| {
+            Scene::Settled { pointer }
+        })
     }
 
     fn chapter(&mut self, surface: StorySurface<'_>, title: &str) -> Result<()> {
@@ -198,6 +206,10 @@ impl Recorder {
     fn hold(&mut self, surface: StorySurface<'_>, duration: Duration) -> Result<()> {
         let pointer = self.pointer;
         self.live_interval(surface, duration, |_, _| Scene::Settled { pointer })
+    }
+
+    fn beat(&self, duration: Duration) -> Duration {
+        duration / u32::from(self.tempo.factor())
     }
 
     /// Sample continuously while advancing an invariant output clock. When a
@@ -312,6 +324,10 @@ impl StoryObserver for Recorder {
         match event {
             StoryEvent::Cue(StoryCue::Chapter { title }) => self.chapter(surface, title),
             StoryEvent::Cue(StoryCue::Hold { duration }) => self.hold(surface, duration),
+            StoryEvent::Cue(StoryCue::Tempo { tempo }) => {
+                self.tempo = tempo;
+                Ok(())
+            }
             StoryEvent::Fact(StoryFact::TargetResolved { .. }) => Ok(()),
             StoryEvent::Fact(StoryFact::PointerAimed {
                 pointer, anchor, ..
@@ -964,6 +980,23 @@ mod tests {
         assert_eq!(recorder.frames_due(Duration::ZERO), 1);
         assert_eq!(recorder.frames_due(Duration::from_millis(16)), 1);
         assert_eq!(recorder.frames_due(Duration::from_millis(17)), 2);
+    }
+
+    #[test]
+    fn tempo_accelerates_automatic_beats_without_erasing_them() {
+        let config = RecorderConfig::new("film.mp4");
+        let directory = tempfile::tempdir().expect("temporary demo directory");
+        let mut recorder = Recorder::forge(RecorderConfig {
+            output: directory.path().join(config.output),
+            ..config
+        })
+        .expect("forge recorder");
+        assert_eq!(recorder.beat(TARGET_FLIGHT), TARGET_FLIGHT);
+
+        recorder.tempo = StoryTempo::EIGHTFOLD;
+        assert_eq!(recorder.beat(TARGET_FLIGHT), Duration::from_micros(27_500));
+        assert_eq!(recorder.frames(recorder.beat(TARGET_FLIGHT)), 2);
+        assert_eq!(recorder.frames(recorder.beat(Duration::ZERO)), 1);
     }
 
     #[test]

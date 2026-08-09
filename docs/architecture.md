@@ -128,10 +128,11 @@ replacement pass that was actually submitted.
 
 `Story` is deliberately not an eager action vector. It executes native input
 and semantic waits while emitting `StoryEvent` items synchronously in causal
-order. `StoryCue` carries authored editorial intent such as chapters and holds.
-`StoryFact` carries resolved target geometry, dispatched input receipts, and
-matched observation identity. A consumer sees only a capture-capable view of
-the product surface and gains no mutation authority.
+order. `StoryCue` carries authored editorial intent: chapters, literal holds,
+and persistent choreography tempo. `StoryFact` carries resolved target
+geometry, dispatched input receipts, and matched observation identity. A
+consumer sees only a capture-capable view of the product surface and gains no
+mutation authority.
 
 Ordinary acceptance attaches `Silent`; film production attaches
 `egui_demo::Recorder`. Both run the same scenario, so a recorded take remains

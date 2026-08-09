@@ -82,8 +82,10 @@ adjudicates production GPU latency.
 
 `egui-demo` is an observer, not a second driver. Attach its `Recorder` to an
 ordinary `Story` before the first frame, then run the same effectful Rust
-scenario used by acceptance. Authored chapter and hold cues coexist with facts
-emitted by resolved targets, native actions, and matched observations. The
+scenario used by acceptance. Authored chapter, hold, and persistent tempo cues
+coexist with facts emitted by resolved targets, native actions, and matched
+observations. Tempo scales the recorder's automatic target, action, and
+observation beats; explicit chapter and hold durations remain literal. The
 observer encodes an H.264 film and a JSONL trace; `Silent` consumes the same
 stream at effectively zero cost during ordinary tests.
 

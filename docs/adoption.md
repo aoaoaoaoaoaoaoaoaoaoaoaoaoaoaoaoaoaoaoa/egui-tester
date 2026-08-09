@@ -47,10 +47,12 @@ threshold.
 
 An optional film is another consumer of the functional story, never another
 choreography engine. Attach `egui_demo::Recorder` before `Story::ready`, place
-editorial `chapter` and `hold` cues in the scenario, and call `Story::finish`
-after the verdict. Terminate the product, then call `Recorder::publish`; this
-keeps offline compression outside the live application lifecycle. The same
-scenario function must remain callable with `Silent`.
+editorial `chapter`, `hold`, and persistent `tempo` cues in the scenario, and
+call `Story::finish` after the verdict. Tempo scales automatic recorder beats,
+not explicit chapter or hold durations. Terminate the product, then call
+`Recorder::publish`; this keeps offline compression outside the live
+application lifecycle. The same scenario function must remain callable with
+`Silent`.
 Recording observers are rejected on production performance rails. The recorder
 samples continuously against its invariant film clock; use
 `EncodingProfile::Proof` for routine evidence and opt presentation artifacts

@@ -1,4 +1,4 @@
-use std::{fmt::Display, thread, time::Duration};
+use std::{fmt::Display, num::NonZeroU16, thread, time::Duration};
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -8,12 +8,45 @@ use crate::{
     X11Session,
 };
 
+/// Persistent rate for observer-authored choreography.
+///
+/// The standard rate is one. Larger factors accelerate automatic beats while
+/// explicit chapter and hold durations retain their authored wall time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct StoryTempo(NonZeroU16);
+
+impl StoryTempo {
+    pub const STANDARD: Self = Self(NonZeroU16::MIN);
+    pub const EIGHTFOLD: Self = Self(match NonZeroU16::new(8) {
+        Some(factor) => factor,
+        None => NonZeroU16::MIN,
+    });
+
+    #[must_use]
+    pub const fn accelerated(factor: NonZeroU16) -> Self {
+        Self(factor)
+    }
+
+    #[must_use]
+    pub const fn factor(self) -> u16 {
+        self.0.get()
+    }
+}
+
+impl Default for StoryTempo {
+    fn default() -> Self {
+        Self::STANDARD
+    }
+}
+
 /// Authored editorial instruction carried by a live story stream.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "cue", rename_all = "snake_case")]
 pub enum StoryCue<'a> {
     Chapter { title: &'a str },
     Hold { duration: Duration },
+    Tempo { tempo: StoryTempo },
 }
 
 /// Immutable execution fact emitted while a story drives the product.
@@ -532,6 +565,11 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         self.emit(StoryEvent::Cue(StoryCue::Hold { duration }))
     }
 
+    /// Set the persistent tempo consumed by choreography observers.
+    pub fn tempo(&mut self, tempo: StoryTempo) -> Result<()> {
+        self.emit(StoryEvent::Cue(StoryCue::Tempo { tempo }))
+    }
+
     pub fn capture(&self) -> Result<Frame> {
         self.session.capture()
     }
@@ -684,5 +722,25 @@ pub fn demand(condition: bool, detail: impl Into<String>) -> Result<()> {
         Err(crate::Error::Verdict {
             detail: detail.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tempo_is_a_typed_serializable_stream_transition() {
+        let event = StoryEvent::Cue(StoryCue::Tempo {
+            tempo: StoryTempo::EIGHTFOLD,
+        });
+        let encoded = serde_json::to_value(event).ok();
+        assert_eq!(
+            encoded,
+            Some(serde_json::json!({
+                "stream": "cue",
+                "event": { "cue": "tempo", "tempo": 8 }
+            }))
+        );
     }
 }
