@@ -16,6 +16,7 @@ use crate::{
 };
 
 const GUEST_ROOT: &str = "/test";
+const SOFTWARE_GRAPHICS_THREADS: &str = "4";
 
 /// Application network authority.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -30,7 +31,9 @@ pub enum Network {
 /// Graphics device authority.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Graphics {
-    /// A pinned, read-only lavapipe runtime with a synthetic `/dev`.
+    /// A pinned, read-only lavapipe runtime with a synthetic `/dev` and four
+    /// worker threads by default. `AppCommand::env("LP_NUM_THREADS", value)`
+    /// may override the resource bound.
     #[default]
     Software,
     /// Host GPU devices plus read-only sysfs, for representative performance.
@@ -661,8 +664,8 @@ fn sealed_environment(
         (OsString::from("RUST_BACKTRACE"), OsString::from("1")),
     ]);
     testbed.display_seal().append_environment(&mut env);
-    if command.graphics == Graphics::Software {
-        env.extend([
+    env.extend(match command.graphics {
+        Graphics::Software => BTreeMap::from([
             (
                 OsString::from("LD_LIBRARY_PATH"),
                 OsString::from("/opt/egui-tester/lavapipe/usr/lib"),
@@ -672,8 +675,13 @@ fn sealed_environment(
                 OsString::from("/opt/egui-tester/lavapipe/usr/share/vulkan/icd.d/lvp_icd.json"),
             ),
             (OsString::from("LIBGL_ALWAYS_SOFTWARE"), OsString::from("1")),
-        ]);
-    }
+            (
+                OsString::from("LP_NUM_THREADS"),
+                OsString::from(SOFTWARE_GRAPHICS_THREADS),
+            ),
+        ]),
+        Graphics::Host => BTreeMap::new(),
+    });
     if let Some(witness) = witness {
         env.extend([
             (

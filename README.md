@@ -40,9 +40,10 @@ observations live beneath `/test`.
 
 Host data is absent by default. `AppCommand::borrow_read_only(path)` is the sole
 data aperture and has no writable counterpart. Network authority is denied
-unless declared. `Graphics::Software` uses the pinned lavapipe runtime;
-`Graphics::Host` admits only discovered GPU character devices plus read-only
-sysfs for representative performance runs.
+unless declared. `Graphics::Software` uses the pinned lavapipe runtime with a
+four-thread default, overridable through `LP_NUM_THREADS`. `Graphics::Host`
+admits only discovered GPU character devices plus read-only sysfs for
+representative performance runs.
 
 Harness-side product files should be read through `Testbed::read_private`.
 These capability operations use `openat2` beneath the private root and reject
