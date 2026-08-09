@@ -33,6 +33,26 @@ const CHAPTER_REST: Duration = Duration::from_millis(1_500);
 pub struct RecorderConfig {
     output: PathBuf,
     frames_per_second: NonZeroU32,
+    encoding_profile: EncodingProfile,
+}
+
+/// H.264 cost and fidelity policy, independent of temporal sampling.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EncodingProfile {
+    /// Fast artifact suitable for exercising recording in an acceptance rail.
+    #[default]
+    Proof,
+    /// Presentation artifact with expensive, animation-tuned compression.
+    Showpiece,
+}
+
+impl EncodingProfile {
+    const fn x264(self) -> (&'static str, &'static str, Option<&'static str>) {
+        match self {
+            Self::Proof => ("veryfast", "18", None),
+            Self::Showpiece => ("slow", "12", Some("animation")),
+        }
+    }
 }
 
 impl RecorderConfig {
@@ -40,13 +60,20 @@ impl RecorderConfig {
     pub fn new(output: impl Into<PathBuf>) -> Self {
         Self {
             output: output.into(),
-            frames_per_second: NonZeroU32::new(12).unwrap_or(NonZeroU32::MIN),
+            frames_per_second: NonZeroU32::new(60).unwrap_or(NonZeroU32::MIN),
+            encoding_profile: EncodingProfile::Proof,
         }
     }
 
     #[must_use]
     pub const fn frames_per_second(mut self, frames_per_second: NonZeroU32) -> Self {
         self.frames_per_second = frames_per_second;
+        self
+    }
+
+    #[must_use]
+    pub const fn encoding_profile(mut self, encoding_profile: EncodingProfile) -> Self {
+        self.encoding_profile = encoding_profile;
         self
     }
 }
@@ -113,72 +140,59 @@ impl Recorder {
     }
 
     fn target(&mut self, surface: StorySurface<'_>, anchor: &Anchor) -> Result<()> {
-        let frame = surface.capture()?;
         let destination = Point::from(anchor.center());
         let origin = self.pointer.unwrap_or(destination);
         self.target = Some(Rect::from(anchor.rect));
-        let steps = self.frames(TARGET_FLIGHT);
-        for step in 1..=steps {
-            let pointer = origin.lerp(destination, step, steps);
-            self.write_scene(&frame, Scene::Target { pointer })?;
-        }
+        self.live_interval(surface, TARGET_FLIGHT, |step, steps| Scene::Target {
+            pointer: origin.lerp(destination, step + 1, steps),
+        })?;
         self.pointer = Some(destination);
-        self.repeat_scene(
-            &frame,
-            Scene::Target {
-                pointer: destination,
-            },
-            TARGET_REST,
-        )
+        self.live_interval(surface, TARGET_REST, |_, _| Scene::Target {
+            pointer: destination,
+        })
     }
 
     fn action(&mut self, surface: StorySurface<'_>, pointer: Option<[i16; 2]>) -> Result<()> {
         if let Some(pointer) = pointer {
             self.pointer = Some(Point::from(pointer));
         }
-        let frame = surface.capture()?;
-        let count = self.frames(ACTION_REST);
-        for phase in 0..count {
-            self.write_scene(
-                &frame,
-                Scene::Action {
-                    pointer: self.pointer,
-                    phase,
-                    phases: count,
-                },
-            )?;
-        }
-        Ok(())
+        let pointer = self.pointer;
+        self.live_interval(surface, ACTION_REST, |phase, phases| Scene::Action {
+            pointer,
+            phase,
+            phases,
+        })
     }
 
     fn observation(&mut self, surface: StorySurface<'_>) -> Result<()> {
-        let frame = surface.capture()?;
-        self.repeat_scene(
-            &frame,
-            Scene::Settled {
-                pointer: self.pointer,
-            },
-            OBSERVATION_REST,
-        )
+        let pointer = self.pointer;
+        self.live_interval(surface, OBSERVATION_REST, |_, _| Scene::Settled { pointer })
     }
 
     fn chapter(&mut self, surface: StorySurface<'_>, title: &str) -> Result<()> {
-        let frame = surface.capture()?;
-        self.repeat_scene(&frame, Scene::Chapter { title }, CHAPTER_REST)
+        self.live_interval(surface, CHAPTER_REST, |_, _| Scene::Chapter { title })
     }
 
     fn hold(&mut self, surface: StorySurface<'_>, duration: Duration) -> Result<()> {
+        let pointer = self.pointer;
+        self.live_interval(surface, duration, |_, _| Scene::Settled { pointer })
+    }
+
+    /// Sample the product anew for every encoded frame. Reusing one screenshot
+    /// here makes autonomous UI animation advance only at story event
+    /// boundaries, producing a nominally high-rate film with a low-rate world.
+    fn live_interval<'a>(
+        &mut self,
+        surface: StorySurface<'_>,
+        duration: Duration,
+        mut scene: impl FnMut(u32, u32) -> Scene<'a>,
+    ) -> Result<()> {
         let count = self.frames(duration);
-        let period = Duration::from_secs_f64(1.0 / f64::from(self.config.frames_per_second.get()));
+        let period = self.frame_period();
         let mut next = Instant::now();
-        for _ in 0..count {
+        for phase in 0..count {
             let frame = surface.capture()?;
-            self.write_scene(
-                &frame,
-                Scene::Settled {
-                    pointer: self.pointer,
-                },
-            )?;
+            self.write_scene(&frame, scene(phase, count))?;
             next += period;
             if let Some(rest) = next.checked_duration_since(Instant::now()) {
                 thread::sleep(rest);
@@ -187,11 +201,8 @@ impl Recorder {
         Ok(())
     }
 
-    fn repeat_scene(&mut self, frame: &Frame, scene: Scene<'_>, duration: Duration) -> Result<()> {
-        for _ in 0..self.frames(duration) {
-            self.write_scene(frame, scene)?;
-        }
-        Ok(())
+    fn frame_period(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / f64::from(self.config.frames_per_second.get()))
     }
 
     fn write_scene(&mut self, frame: &Frame, scene: Scene<'_>) -> Result<()> {
@@ -203,6 +214,7 @@ impl Recorder {
                 frame.width(),
                 frame.height(),
                 self.config.frames_per_second,
+                self.config.encoding_profile,
             )?);
         }
         self.encoder
@@ -311,40 +323,45 @@ impl Encoder {
         width: u32,
         height: u32,
         frames_per_second: NonZeroU32,
+        encoding_profile: EncodingProfile,
     ) -> Result<Self> {
         let geometry = format!("{width}x{height}");
         let rate = frames_per_second.to_string();
+        let (preset, crf, tune) = encoding_profile.x264();
         let mut command = Command::new("ffmpeg");
+        let _command = command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "rgba",
+            "-video_size",
+            &geometry,
+            "-framerate",
+            &rate,
+            "-i",
+            "pipe:0",
+            "-an",
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            preset,
+            "-crf",
+            crf,
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ]);
+        if let Some(tune) = tune {
+            let _tune = command.args(["-tune", tune]);
+        }
         let _command = command
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "rawvideo",
-                "-pixel_format",
-                "rgba",
-                "-video_size",
-                &geometry,
-                "-framerate",
-                &rate,
-                "-i",
-                "pipe:0",
-                "-an",
-                "-vf",
-                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "18",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-            ])
             .arg(output)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -817,7 +834,17 @@ mod tests {
             ..config
         })
         .expect("forge recorder");
+        assert_eq!(recorder.config.frames_per_second.get(), 60);
+        assert_eq!(recorder.config.encoding_profile, EncodingProfile::Proof);
         assert_eq!(recorder.frames(Duration::ZERO), 1);
-        assert_eq!(recorder.frames(Duration::from_millis(84)), 2);
+        assert_eq!(recorder.frames(Duration::from_millis(84)), 6);
+    }
+
+    #[test]
+    fn showpiece_profile_is_slow_and_animation_tuned() {
+        assert_eq!(
+            EncodingProfile::Showpiece.x264(),
+            ("slow", "12", Some("animation"))
+        );
     }
 }

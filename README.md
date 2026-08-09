@@ -86,6 +86,12 @@ emitted by resolved targets, native actions, and matched observations. The
 observer encodes an H.264 film and a JSONL trace; `Silent` consumes the same
 stream at effectively zero cost during ordinary tests.
 
+The recorder samples the live product surface for every film frame; ambient
+animation never degenerates into repeated semantic-event stills. Temporal
+sampling defaults to 60 fps. `EncodingProfile::Proof` keeps routine recorded
+tests cheap, while `EncodingProfile::Showpiece` selects slow,
+animation-tuned compression for presentation artifacts.
+
 Recording is barred from production latency adjudication because synchronous
 capture changes wall time. The trace records what one execution did; it is not
 yet a promise that persisted facts can deterministically replay another run.
