@@ -992,10 +992,17 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
     }
 
     pub fn capture(&self) -> Result<Frame> {
-        self.app.ensure_running("window capture")?;
-        let frame = self.controller.capture(&self.window)?;
+        let frame = self.capture_ephemeral()?;
         self.remember(&frame)?;
         Ok(frame)
+    }
+
+    /// Capture product pixels without serializing the diagnostic latest-frame
+    /// PNG. Stream observers already own the returned frame; persisting every
+    /// sample would put PNG compression in their temporal hot path.
+    pub(crate) fn capture_ephemeral(&self) -> Result<Frame> {
+        self.app.ensure_running("window capture")?;
+        self.controller.capture(&self.window)
     }
 
     /// Wait for the standard surface-present cue, then sample product pixels.

@@ -57,7 +57,7 @@ trait CaptureSurface {
 
 impl CaptureSurface for X11Session<'_, '_> {
     fn capture(&self) -> Result<Frame> {
-        X11Session::capture(self)
+        self.capture_ephemeral()
     }
 }
 
