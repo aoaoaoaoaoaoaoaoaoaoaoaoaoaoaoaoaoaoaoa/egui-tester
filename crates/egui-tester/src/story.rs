@@ -24,6 +24,14 @@ pub enum StoryFact<'a> {
         target: &'a str,
         anchor: &'a Anchor,
     },
+    /// A pointer-bearing gesture has acquired its destination but has not yet
+    /// touched the product. Recorders may therefore compose an approach
+    /// without mistaking target reconnaissance for visible choreography.
+    PointerAimed {
+        target: Option<&'a str>,
+        pointer: [i16; 2],
+        anchor: Option<&'a Anchor>,
+    },
     ActionDispatched {
         action: &'a str,
         target: Option<&'a str>,
@@ -243,10 +251,10 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
     pub fn click(&mut self, target: impl Display) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         let target = target.to_string();
         let anchor = self.anchor(target.as_str())?;
-        let receipt = self
-            .session
-            .click(anchor.center().0, anchor.center().1, Button::Primary)?;
-        self.emit_action(&receipt, Some(&target), Some(anchor.center()))?;
+        let point = anchor.center();
+        self.aim(Some(&target), point, Some(&anchor))?;
+        let receipt = self.session.click(point.0, point.1, Button::Primary)?;
+        self.emit_action(&receipt, Some(&target), Some(point))?;
         Ok(self.reaction_named(receipt, format!("click `{target}`")))
     }
 
@@ -259,6 +267,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         let target = target.to_string();
         let anchor = self.anchor(target.as_str())?;
         let (x, y) = anchor.center();
+        self.aim(Some(&target), (x, y), Some(&anchor))?;
         let receipt = self.session.modified_click(x, y, button, modifiers)?;
         self.emit_action(&receipt, Some(&target), Some((x, y)))?;
         Ok(self.reaction_named(receipt, format!("{modifiers:?} click `{target}`")))
@@ -266,6 +275,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
 
     pub fn click_anchor(&mut self, anchor: &Anchor) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         let (x, y) = anchor.center();
+        self.aim(Some(&anchor.name), (x, y), Some(anchor))?;
         let receipt = self.session.click(x, y, Button::Primary)?;
         self.emit_action(&receipt, Some(&anchor.name), Some((x, y)))?;
         Ok(self.reaction_named(receipt, format!("click `{}`", anchor.name)))
@@ -276,6 +286,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         point: (i16, i16),
         button: Button,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        self.aim(None, point, None)?;
         let receipt = self.session.click(point.0, point.1, button)?;
         self.emit_action(&receipt, None, Some(point))?;
         Ok(self.reaction(receipt))
@@ -293,7 +304,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         policy: Motion,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         let target = target.to_string();
-        let destination = self.anchor(target.as_str())?.center();
+        let anchor = self.anchor(target.as_str())?;
+        let destination = anchor.center();
+        self.aim(Some(&target), destination, Some(&anchor))?;
         let receipt = self.session.motion(destination, policy)?;
         self.emit_action(&receipt, Some(&target), Some(destination))?;
         Ok(self.reaction_named(receipt, format!("point at `{target}`")))
@@ -304,6 +317,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         destination: (i16, i16),
         policy: Motion,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        self.aim(None, destination, None)?;
         let receipt = self.session.motion(destination, policy)?;
         self.emit_action(&receipt, None, Some(destination))?;
         Ok(self.reaction(receipt))
@@ -320,6 +334,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         let _hovered = self.point(target.as_str(), policy)?.next_frame()?;
         let anchor = self.anchor(target.as_str())?;
         let point = anchor.center();
+        self.aim(Some(&target), point, Some(&anchor))?;
         let receipt = self.session.click(point.0, point.1, button)?;
         self.emit_action(&receipt, Some(&target), Some(point))?;
         Ok(self.reaction_named(receipt, format!("tap `{target}`")))
@@ -331,6 +346,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         button: Button,
         modifiers: Modifiers,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        self.aim(None, point, None)?;
         let receipt = self
             .session
             .modified_click(point.0, point.1, button, modifiers)?;
@@ -345,7 +361,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         policy: Drag,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         let target = target.to_string();
-        let origin = self.anchor(target.as_str())?.center();
+        let anchor = self.anchor(target.as_str())?;
+        let origin = anchor.center();
+        self.aim(Some(&target), origin, Some(&anchor))?;
         let receipt = self.session.drag(origin, destination, policy)?;
         self.emit_action(&receipt, Some(&target), Some(destination))?;
         Ok(self.reaction_named(receipt, format!("drag `{target}`")))
@@ -357,6 +375,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         destination: (i16, i16),
         policy: Drag,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        self.aim(None, origin, None)?;
         let receipt = self.session.drag(origin, destination, policy)?;
         self.emit_action(&receipt, None, Some(destination))?;
         Ok(self.reaction(receipt))
@@ -374,7 +393,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         let origin = origin.to_string();
         let destination = destination.to_string();
-        let start = self.anchor(origin.as_str())?.center();
+        let origin_anchor = self.anchor(origin.as_str())?;
+        let start = origin_anchor.center();
+        self.aim(Some(&origin), start, Some(&origin_anchor))?;
         let down = self.session.button_down(start.0, start.1, policy.button)?;
         let operation = (|| -> Result<(i16, i16)> {
             self.emit_action(&down, Some(&origin), Some(start))?;
@@ -384,7 +405,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
             let _acquired = self
                 .reaction_named(down, format!("acquire `{origin}`"))
                 .next_frame()?;
-            let end = self.anchor(destination.as_str())?.center();
+            let destination_anchor = self.anchor(destination.as_str())?;
+            let end = destination_anchor.center();
+            self.aim(Some(&destination), end, Some(&destination_anchor))?;
             let motion = self.session.motion(
                 end,
                 Motion {
@@ -407,6 +430,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         knots: &[(i16, i16)],
         policy: Stroke,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        if let Some(&origin) = knots.first() {
+            self.aim(None, origin, None)?;
+        }
         let receipt = self.session.stroke(knots, policy)?;
         self.emit_action(&receipt, None, knots.last().copied())?;
         Ok(self.reaction(receipt))
@@ -418,6 +444,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         ticks: i32,
         policy: Wheel,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        self.aim(None, point, None)?;
         let receipt = self.session.wheel(point.0, point.1, ticks, policy)?;
         self.emit_action(&receipt, None, Some(point))?;
         Ok(self.reaction(receipt))
@@ -430,6 +457,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         policy: Wheel,
         modifiers: Modifiers,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        self.aim(None, point, None)?;
         let receipt = self
             .session
             .modified_wheel(point.0, point.1, ticks, policy, modifiers)?;
@@ -442,6 +470,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         point: (i16, i16),
         ticks: i32,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        self.aim(None, point, None)?;
         let receipt = self.session.scroll(point.0, point.1, ticks)?;
         self.emit_action(&receipt, None, Some(point))?;
         Ok(self.reaction(receipt))
@@ -571,6 +600,19 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
             gesture_started_ns: receipt.gesture_started_ns(),
             triggered_ns: receipt.triggered_ns(),
             completed_ns: receipt.completed_ns(),
+        }))
+    }
+
+    fn aim(
+        &mut self,
+        target: Option<&str>,
+        pointer: (i16, i16),
+        anchor: Option<&Anchor>,
+    ) -> Result<()> {
+        self.emit(StoryEvent::Fact(StoryFact::PointerAimed {
+            target,
+            pointer: [pointer.0, pointer.1],
+            anchor,
         }))
     }
 

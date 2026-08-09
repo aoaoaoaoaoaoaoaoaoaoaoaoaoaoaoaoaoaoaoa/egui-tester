@@ -21,7 +21,7 @@ use egui_tester::{
 use font8x8::{BASIC_FONTS, UnicodeFonts as _};
 use serde::Serialize;
 
-const TRACE_SCHEMA: &str = "egui-demo.trace/1";
+const TRACE_SCHEMA: &str = "egui-demo.trace/2";
 const TARGET_FLIGHT: Duration = Duration::from_millis(220);
 const TARGET_REST: Duration = Duration::from_millis(100);
 const ACTION_REST: Duration = Duration::from_millis(160);
@@ -156,10 +156,15 @@ impl Recorder {
         Ok(self)
     }
 
-    fn target(&mut self, surface: StorySurface<'_>, anchor: &Anchor) -> Result<()> {
-        let destination = Point::from(anchor.center());
+    fn aim(
+        &mut self,
+        surface: StorySurface<'_>,
+        pointer: [i16; 2],
+        anchor: Option<&Anchor>,
+    ) -> Result<()> {
+        let destination = Point::from(pointer);
         let origin = self.pointer.unwrap_or(destination);
-        self.target = Some(Rect::from(anchor.rect));
+        self.target = anchor.map(|anchor| Rect::from(anchor.rect));
         self.live_interval(surface, TARGET_FLIGHT, |step, steps| Scene::Target {
             pointer: origin.lerp(destination, step + 1, steps),
         })?;
@@ -307,9 +312,10 @@ impl StoryObserver for Recorder {
         match event {
             StoryEvent::Cue(StoryCue::Chapter { title }) => self.chapter(surface, title),
             StoryEvent::Cue(StoryCue::Hold { duration }) => self.hold(surface, duration),
-            StoryEvent::Fact(StoryFact::TargetResolved { anchor, .. }) => {
-                self.target(surface, anchor)
-            }
+            StoryEvent::Fact(StoryFact::TargetResolved { .. }) => Ok(()),
+            StoryEvent::Fact(StoryFact::PointerAimed {
+                pointer, anchor, ..
+            }) => self.aim(surface, pointer, anchor),
             StoryEvent::Fact(StoryFact::ActionDispatched { pointer, .. }) => {
                 self.action(surface, pointer)
             }
