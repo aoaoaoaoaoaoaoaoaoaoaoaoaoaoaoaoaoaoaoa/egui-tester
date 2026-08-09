@@ -143,6 +143,19 @@ impl Recorder {
         self.frames_written
     }
 
+    /// Publish the sealed capture. Call this after terminating the product so
+    /// an offline showpiece transcode cannot contend with an idle live app.
+    pub fn publish(mut self) -> Result<Self> {
+        self.seal()?;
+        self.encoder
+            .as_mut()
+            .ok_or_else(|| Error::Verdict {
+                detail: "egui-demo encoder vanished before publication".to_owned(),
+            })?
+            .publish()?;
+        Ok(self)
+    }
+
     fn target(&mut self, surface: StorySurface<'_>, anchor: &Anchor) -> Result<()> {
         let destination = Point::from(anchor.center());
         let origin = self.pointer.unwrap_or(destination);
@@ -279,10 +292,10 @@ impl Recorder {
         self.trace
             .flush()
             .map_err(|source| io("flush story event trace", &self.trace_path, source))?;
-        let encoder = self.encoder.take().ok_or_else(|| Error::Verdict {
+        let encoder = self.encoder.as_mut().ok_or_else(|| Error::Verdict {
             detail: "story emitted no recordable surface frames".to_owned(),
         })?;
-        encoder.finish()?;
+        encoder.seal()?;
         self.sealed = true;
         Ok(())
     }
@@ -336,7 +349,8 @@ struct Encoder {
     width: u32,
     height: u32,
     frame_bytes: usize,
-    sealed: bool,
+    capture_sealed: bool,
+    published: bool,
 }
 
 impl Encoder {
@@ -440,7 +454,8 @@ impl Encoder {
             width,
             height,
             frame_bytes,
-            sealed: false,
+            capture_sealed: false,
+            published: false,
         })
     }
 
@@ -469,7 +484,10 @@ impl Encoder {
             .map_err(|source| io("write egui-demo frame", &self.output, source))
     }
 
-    fn finish(mut self) -> Result<()> {
+    fn seal(&mut self) -> Result<()> {
+        if self.capture_sealed {
+            return Ok(());
+        }
         drop(self.input.take());
         let child = self.child.take().ok_or_else(|| Error::Verdict {
             detail: "egui-demo encoder process vanished before closure".to_owned(),
@@ -477,13 +495,23 @@ impl Encoder {
         let output = child
             .wait_with_output()
             .map_err(|source| io("wait for egui-demo encoder", &self.output, source))?;
-        self.sealed = true;
+        self.capture_sealed = true;
         demand_command(output, format!("ffmpeg -> {}", self.capture.display()))?;
-        if self.encoding_profile.stages_lossless_capture() {
-            self.transcode_showpiece()?;
-            fs::remove_file(&self.capture)
-                .map_err(|source| io("remove lossless egui-demo capture", &self.capture, source))?;
+        if !self.encoding_profile.stages_lossless_capture() {
+            self.published = true;
         }
+        Ok(())
+    }
+
+    fn publish(&mut self) -> Result<()> {
+        self.seal()?;
+        if self.published {
+            return Ok(());
+        }
+        self.transcode_showpiece()?;
+        fs::remove_file(&self.capture)
+            .map_err(|source| io("remove lossless egui-demo capture", &self.capture, source))?;
+        self.published = true;
         Ok(())
     }
 
@@ -523,14 +551,13 @@ impl Encoder {
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        if self.sealed {
-            return;
+        if !self.capture_sealed {
+            drop(self.input.take());
+            if let Some(mut child) = self.child.take() {
+                let _status = child.wait();
+            }
         }
-        drop(self.input.take());
-        if let Some(mut child) = self.child.take() {
-            let _status = child.wait();
-        }
-        if self.encoding_profile.stages_lossless_capture() {
+        if self.encoding_profile.stages_lossless_capture() && !self.published {
             let _removed = fs::remove_file(&self.capture);
         }
     }

@@ -138,8 +138,10 @@ Ordinary acceptance attaches `Silent`; film production attaches
 an acceptance execution rather than an independently scheduled imitation. The
 recorder samples the product continuously against an invariant output clock so
 ambient animation remains temporally honest between semantic events, even when
-a capture misses one tick. The showpiece rail keeps that live clock upstream of compression by staging lossless RGB and performing
-the expensive presentation transcode only after story execution.
+a capture misses one tick. The showpiece rail keeps that live clock upstream of
+compression by staging lossless RGB and performing the expensive presentation
+transcode only after story execution and product teardown. `Story::finish`
+seals live capture; `Recorder::publish` owns only offline artifact work.
 Facts are serializable provenance, not executable commands. Deterministic
 replay remains a separate policy problem because targets may move and waits
 may resolve along different lawful paths.

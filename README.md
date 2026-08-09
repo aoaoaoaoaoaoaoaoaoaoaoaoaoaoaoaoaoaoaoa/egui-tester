@@ -92,7 +92,9 @@ stills, and a tardy capture cannot dilate world time. `EncodingProfile::Proof`
 keeps routine recorded tests cheap, while `EncodingProfile::Showpiece` selects slow,
 animation-tuned compression for presentation artifacts. Showpiece capture is
 first sealed into a lossless RGB staging film, then transcoded offline; final
-compression therefore cannot throttle or distort the live story clock.
+compression therefore cannot throttle or distort the live story clock. End
+the story, terminate the product, then call `Recorder::publish` so the offline
+transcode never competes with an idle renderer.
 
 Recording is barred from production latency adjudication because synchronous
 capture changes wall time. The trace records what one execution did; it is not
