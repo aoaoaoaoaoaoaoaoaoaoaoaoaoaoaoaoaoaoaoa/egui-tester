@@ -49,9 +49,10 @@ An optional film is another consumer of the functional story, never another
 choreography engine. Attach `egui_demo::Recorder` before `Story::ready`, place
 editorial `chapter` and `hold` cues in the scenario, and call `Story::finish`
 after the verdict. The same function must remain callable with `Silent`.
-Recording observers are rejected on production performance rails. Every film
-frame captures the live surface; use `EncodingProfile::Proof` for routine
-evidence and opt presentation artifacts into `EncodingProfile::Showpiece`.
+Recording observers are rejected on production performance rails. The recorder
+samples continuously against its invariant film clock; use
+`EncodingProfile::Proof` for routine evidence and opt presentation artifacts
+into `EncodingProfile::Showpiece`.
 The latter records through a lossless RGB staging film before its slow final
 transcode, preserving real-time sampling under expensive compression.
 

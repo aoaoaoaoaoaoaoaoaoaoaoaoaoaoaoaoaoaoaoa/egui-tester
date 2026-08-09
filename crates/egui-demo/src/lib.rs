@@ -182,9 +182,9 @@ impl Recorder {
         self.live_interval(surface, duration, |_, _| Scene::Settled { pointer })
     }
 
-    /// Sample the product anew for every encoded frame. Reusing one screenshot
-    /// here makes autonomous UI animation advance only at story event
-    /// boundaries, producing a nominally high-rate film with a low-rate world.
+    /// Sample continuously while advancing an invariant output clock. When a
+    /// capture exceeds one film period, the freshest product frame fills every
+    /// elapsed tick; compression or capture latency cannot stretch world time.
     fn live_interval<'a>(
         &mut self,
         surface: StorySurface<'_>,
@@ -193,13 +193,22 @@ impl Recorder {
     ) -> Result<()> {
         let count = self.frames(duration);
         let period = self.frame_period();
-        let mut next = Instant::now();
-        for phase in 0..count {
-            let frame = surface.capture()?;
-            self.write_scene(&frame, scene(phase, count))?;
-            next += period;
-            if let Some(rest) = next.checked_duration_since(Instant::now()) {
+        let begun = Instant::now();
+        let mut phase = 0;
+        let mut capture_cost = Duration::ZERO;
+        while phase < count {
+            let tick = begun + period * phase;
+            let capture_at = tick.checked_sub(capture_cost).unwrap_or(begun);
+            if let Some(rest) = capture_at.checked_duration_since(Instant::now()) {
                 thread::sleep(rest);
+            }
+            let capture_begun = Instant::now();
+            let frame = surface.capture()?;
+            capture_cost = capture_begun.elapsed();
+            let due = self.frames_due(begun.elapsed()).min(count).max(phase + 1);
+            while phase < due {
+                self.write_scene(&frame, scene(phase, count))?;
+                phase += 1;
             }
         }
         Ok(())
@@ -234,6 +243,13 @@ impl Recorder {
     fn frames(&self, duration: Duration) -> u32 {
         let numerator = duration.as_nanos() * u128::from(self.config.frames_per_second.get());
         let count = numerator.div_ceil(1_000_000_000).max(1);
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    fn frames_due(&self, elapsed: Duration) -> u32 {
+        let count = elapsed.as_nanos() * u128::from(self.config.frames_per_second.get())
+            / 1_000_000_000
+            + 1;
         u32::try_from(count).unwrap_or(u32::MAX)
     }
 
@@ -912,6 +928,9 @@ mod tests {
         assert_eq!(recorder.config.encoding_profile, EncodingProfile::Proof);
         assert_eq!(recorder.frames(Duration::ZERO), 1);
         assert_eq!(recorder.frames(Duration::from_millis(84)), 6);
+        assert_eq!(recorder.frames_due(Duration::ZERO), 1);
+        assert_eq!(recorder.frames_due(Duration::from_millis(16)), 1);
+        assert_eq!(recorder.frames_due(Duration::from_millis(17)), 2);
     }
 
     #[test]
