@@ -144,6 +144,10 @@ the black-box fixture. CI schedules those evidence units, checks both
 publishable crates, and runs the product-side witness on macOS and Windows. It
 does not imply Wayland or non-X11 harness parity.
 
+`scripts/release VERSION publish` is the sole publication entrypoint. It
+proves both packages, publishes the product-side witness first, waits until the
+registry can resolve it, then publishes the harness from the same signed tag.
+
 `egui-tester-doctor` verifies the canonical user manager, raises one isolated
 X11 universe, then destroys it. Trailgen is the reference full adoption:
 
