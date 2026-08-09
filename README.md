@@ -90,7 +90,9 @@ The recorder samples the live product surface for every film frame; ambient
 animation never degenerates into repeated semantic-event stills. Temporal
 sampling defaults to 60 fps. `EncodingProfile::Proof` keeps routine recorded
 tests cheap, while `EncodingProfile::Showpiece` selects slow,
-animation-tuned compression for presentation artifacts.
+animation-tuned compression for presentation artifacts. Showpiece capture is
+first sealed into a lossless RGB staging film, then transcoded offline; final
+compression therefore cannot throttle or distort the live story clock.
 
 Recording is barred from production latency adjudication because synchronous
 capture changes wall time. The trace records what one execution did; it is not

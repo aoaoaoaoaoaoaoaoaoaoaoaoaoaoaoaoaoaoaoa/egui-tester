@@ -53,6 +53,10 @@ impl EncodingProfile {
             Self::Showpiece => ("slow", "12", Some("animation")),
         }
     }
+
+    const fn stages_lossless_capture(self) -> bool {
+        matches!(self, Self::Showpiece)
+    }
 }
 
 impl RecorderConfig {
@@ -309,6 +313,8 @@ struct TraceRecord<'a> {
 
 struct Encoder {
     output: PathBuf,
+    capture: PathBuf,
+    encoding_profile: EncodingProfile,
     child: Option<Child>,
     input: Option<ChildStdin>,
     width: u32,
@@ -327,7 +333,11 @@ impl Encoder {
     ) -> Result<Self> {
         let geometry = format!("{width}x{height}");
         let rate = frames_per_second.to_string();
-        let (preset, crf, tune) = encoding_profile.x264();
+        let capture = if encoding_profile.stages_lossless_capture() {
+            output.with_extension("capture.mkv")
+        } else {
+            output.to_owned()
+        };
         let mut command = Command::new("ffmpeg");
         let _command = command.args([
             "-hide_banner",
@@ -345,24 +355,40 @@ impl Encoder {
             "-i",
             "pipe:0",
             "-an",
-            "-vf",
-            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset,
-            "-crf",
-            crf,
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
         ]);
-        if let Some(tune) = tune {
-            let _tune = command.args(["-tune", tune]);
+        match encoding_profile {
+            EncodingProfile::Proof => {
+                let (preset, crf, _) = encoding_profile.x264();
+                let _proof = command.args([
+                    "-vf",
+                    "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    preset,
+                    "-crf",
+                    crf,
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                ]);
+            }
+            EncodingProfile::Showpiece => {
+                let _capture = command.args([
+                    "-c:v",
+                    "libx264rgb",
+                    "-preset",
+                    "ultrafast",
+                    "-qp",
+                    "0",
+                    "-pix_fmt",
+                    "bgr0",
+                ]);
+            }
         }
         let _command = command
-            .arg(output)
+            .arg(&capture)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -391,6 +417,8 @@ impl Encoder {
             })?;
         Ok(Self {
             output: output.to_owned(),
+            capture,
+            encoding_profile,
             child: Some(child),
             input: Some(input),
             width,
@@ -434,15 +462,46 @@ impl Encoder {
             .wait_with_output()
             .map_err(|source| io("wait for egui-demo encoder", &self.output, source))?;
         self.sealed = true;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(Error::Command {
-                command: format!("ffmpeg -> {}", self.output.display()),
-                status: output.status.to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            })
+        demand_command(output, format!("ffmpeg -> {}", self.capture.display()))?;
+        if self.encoding_profile.stages_lossless_capture() {
+            self.transcode_showpiece()?;
+            fs::remove_file(&self.capture)
+                .map_err(|source| io("remove lossless egui-demo capture", &self.capture, source))?;
         }
+        Ok(())
+    }
+
+    fn transcode_showpiece(&self) -> Result<()> {
+        let (preset, crf, tune) = self.encoding_profile.x264();
+        let mut command = Command::new("ffmpeg");
+        let _command = command.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]);
+        let _capture = command.arg(&self.capture);
+        let _command = command.args([
+            "-an",
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            preset,
+            "-crf",
+            crf,
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+        ]);
+        if let Some(tune) = tune {
+            let _tune = command.args(["-tune", tune]);
+        }
+        let output = command
+            .arg(&self.output)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|source| io("spawn egui-demo showpiece transcode", &self.output, source))?;
+        demand_command(output, format!("ffmpeg -> {}", self.output.display()))
     }
 }
 
@@ -455,6 +514,21 @@ impl Drop for Encoder {
         if let Some(mut child) = self.child.take() {
             let _status = child.wait();
         }
+        if self.encoding_profile.stages_lossless_capture() {
+            let _removed = fs::remove_file(&self.capture);
+        }
+    }
+}
+
+fn demand_command(output: std::process::Output, command: String) -> Result<()> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Command {
+            command,
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
     }
 }
 
@@ -842,6 +916,8 @@ mod tests {
 
     #[test]
     fn showpiece_profile_is_slow_and_animation_tuned() {
+        assert!(!EncodingProfile::Proof.stages_lossless_capture());
+        assert!(EncodingProfile::Showpiece.stages_lossless_capture());
         assert_eq!(
             EncodingProfile::Showpiece.x264(),
             ("slow", "12", Some("animation"))

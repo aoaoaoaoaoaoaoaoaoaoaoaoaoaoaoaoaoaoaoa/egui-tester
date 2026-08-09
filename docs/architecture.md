@@ -137,7 +137,9 @@ Ordinary acceptance attaches `Silent`; film production attaches
 `egui_demo::Recorder`. Both run the same scenario, so a recorded take remains
 an acceptance execution rather than an independently scheduled imitation. The
 recorder resamples the product on every output frame so ambient animation
-remains temporally honest between semantic events.
+remains temporally honest between semantic events. The showpiece rail keeps
+that live clock upstream of compression by staging lossless RGB and performing
+the expensive presentation transcode only after story execution.
 Facts are serializable provenance, not executable commands. Deterministic
 replay remains a separate policy problem because targets may move and waits
 may resolve along different lawful paths.

@@ -52,6 +52,8 @@ after the verdict. The same function must remain callable with `Silent`.
 Recording observers are rejected on production performance rails. Every film
 frame captures the live surface; use `EncodingProfile::Proof` for routine
 evidence and opt presentation artifacts into `EncodingProfile::Showpiece`.
+The latter records through a lossless RGB staging film before its slow final
+transcode, preserving real-time sampling under expensive compression.
 
 ## Publisher Lifecycle
 
