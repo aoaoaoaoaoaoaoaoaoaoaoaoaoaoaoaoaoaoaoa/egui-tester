@@ -45,6 +45,12 @@ Functional stories use deterministic software graphics and
 latency. A functional deadline is not a disguised generous performance
 threshold.
 
+An optional film is another consumer of the functional story, never another
+choreography engine. Attach `egui_demo::Recorder` before `Story::ready`, place
+editorial `chapter` and `hold` cues in the scenario, and call `Story::finish`
+after the verdict. The same function must remain callable with `Silent`.
+Recording observers are rejected on production performance rails.
+
 ## Publisher Lifecycle
 
 One product frame follows this order:
@@ -87,14 +93,11 @@ The witness may say a route signature changed. Persisted geometry or visible
 pixels decide whether routing worked. A post-trigger frame is not called
 “caused” merely because no earlier frame matched.
 
-Fast native batches still preserve gesture integrity. Modified clicks fence
-modifier press and release. Custom canvas drags should use:
-
-1. `button_down` on the witnessed target;
-2. wait for product acquisition;
-3. `move_to` and wait for recomputation;
-4. judge pixels or durable geometry;
-5. `button_up` and wait for release.
+Fast native batches still preserve gesture integrity. Modified clicks and
+wheels fence modifier press and release. Layout-sensitive drags should use
+`Story::drag_to`, which acquires the witnessed source, waits for a fresh frame,
+resolves the destination after acquisition, and attempts release on every
+error path.
 
 This tests pointer capture without scheduler sleeps. Product kinetics such as
 smoothed zoom use projection-scoped `Probe::wait_stable` before a baseline is

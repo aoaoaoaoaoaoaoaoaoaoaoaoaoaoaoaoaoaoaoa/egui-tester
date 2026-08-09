@@ -20,6 +20,8 @@ X11 is the complete, release-tested vertical:
 - launch-sealed semantic and frame journals through `egui-tester-witness`;
 - typed `Story<S>`, composable `Condition<S>`, and gesture `Reaction`
   porcelain;
+- a serializable live story stream whose optional consumers include films and
+  execution traces;
 - separate functional deadlines, reaction latency contracts, and sustained
   cadence contracts;
 - curated logs, private outputs, captures, and diagnostics on failure.
@@ -74,6 +76,19 @@ statistics come directly from product timestamps; there is no guessed
 instrumentation multiplier or post-hoc “witness tax” correction. Functional
 stories normally use deterministic software graphics. Host graphics alone
 adjudicates production GPU latency.
+
+## Optional Films
+
+`egui-demo` is an observer, not a second driver. Attach its `Recorder` to an
+ordinary `Story` before the first frame, then run the same effectful Rust
+scenario used by acceptance. Authored chapter and hold cues coexist with facts
+emitted by resolved targets, native actions, and matched observations. The
+observer encodes an H.264 film and a JSONL trace; `Silent` consumes the same
+stream at effectively zero cost during ordinary tests.
+
+Recording is barred from production latency adjudication because synchronous
+capture changes wall time. The trace records what one execution did; it is not
+yet a promise that persisted facts can deterministically replay another run.
 
 ## Example
 

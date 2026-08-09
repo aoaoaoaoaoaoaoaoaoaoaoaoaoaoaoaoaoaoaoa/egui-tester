@@ -8,6 +8,7 @@
 mod condition;
 mod error;
 mod frames;
+mod input;
 mod pixels;
 mod probe;
 mod service;
@@ -19,12 +20,13 @@ mod x11;
 pub use condition::{Condition, Field, field};
 pub use error::{Error, Result};
 pub use frames::{CadenceBudget, CadenceReport, FrameProbe, FrameSample, FrameTrace};
+pub use input::{Button, Drag, Key, Modifiers, Motion, Stroke, Wheel};
 pub use pixels::{Frame, PixelRegion};
 pub use probe::{Anchor, LegacyJsonProbe, LegacyProbe, LegacyProbeFrame, Probe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
-pub use story::{Reaction, Story, demand};
+pub use story::{
+    Reaction, Silent, Story, StoryCue, StoryEvent, StoryFact, StoryObserver, StorySurface, demand,
+};
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
 pub use timing::{ActionReceipt, ReactionBudget, ReactionEndpoint, Timed};
-pub use x11::{
-    Button, Drag, Key, Modifiers, Stroke, Wheel, Window, WindowQuery, X11Controller, X11Session,
-};
+pub use x11::{Window, WindowQuery, X11Controller, X11Session};

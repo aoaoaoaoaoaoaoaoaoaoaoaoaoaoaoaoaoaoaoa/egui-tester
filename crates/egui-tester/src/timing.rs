@@ -54,6 +54,11 @@ impl ActionReceipt {
         self
     }
 
+    pub(crate) fn relabel(mut self, action: impl Into<String>) -> Self {
+        self.action = action.into();
+        self
+    }
+
     #[must_use]
     pub const fn gesture_started_ns(&self) -> u64 {
         self.gesture_started_ns

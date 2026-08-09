@@ -12,6 +12,9 @@ synchronization.
 
 **Oracle** is external product evidence used for a verdict.
 
+**Story** is the effectful, typed program that drives one application and emits
+a causal stream of authored cues and immutable execution facts.
+
 **Borrow** is a live host path deliberately exposed read-only. It never means a
 writable mount, overlay, or redirection.
 
@@ -121,6 +124,22 @@ Structural layout changes should request an egui discard pass. Application
 instrumentation must clear targets at every pass and publish only the
 replacement pass that was actually submitted.
 
+## Story Stream
+
+`Story` is deliberately not an eager action vector. It executes native input
+and semantic waits while emitting `StoryEvent` items synchronously in causal
+order. `StoryCue` carries authored editorial intent such as chapters and holds.
+`StoryFact` carries resolved target geometry, dispatched input receipts, and
+matched observation identity. A consumer sees only a capture-capable view of
+the product surface and gains no mutation authority.
+
+Ordinary acceptance attaches `Silent`; film production attaches
+`egui_demo::Recorder`. Both run the same scenario, so a recorded take remains
+an acceptance execution rather than an independently scheduled imitation.
+Facts are serializable provenance, not executable commands. Deterministic
+replay remains a separate policy problem because targets may move and waits
+may resolve along different lawful paths.
+
 ## Timing
 
 An `ActionReceipt` records gesture start, the final input capable of satisfying
@@ -159,5 +178,5 @@ cannot express.
 
 Other named gaps are multi-window and native-dialog choreography, tray
 surfaces, window move/resize, clipboard and IME input, text beyond Latin-1, and
-a serializable action timeline for recording. A product must park a dependent
-story rather than smuggle xdotool or ambient desktop authority back in.
+replay policy for persisted story traces. A product must park a dependent story
+rather than smuggle xdotool or ambient desktop authority back in.
