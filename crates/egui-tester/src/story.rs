@@ -18,10 +18,9 @@ pub struct StoryTempo(NonZeroU16);
 
 impl StoryTempo {
     pub const STANDARD: Self = Self(NonZeroU16::MIN);
-    pub const EIGHTFOLD: Self = Self(match NonZeroU16::new(8) {
-        Some(factor) => factor,
-        None => NonZeroU16::MIN,
-    });
+    pub const TWOFOLD: Self = Self::integer(2);
+    pub const FOURFOLD: Self = Self::integer(4);
+    pub const EIGHTFOLD: Self = Self::integer(8);
 
     #[must_use]
     pub const fn accelerated(factor: NonZeroU16) -> Self {
@@ -31,6 +30,13 @@ impl StoryTempo {
     #[must_use]
     pub const fn factor(self) -> u16 {
         self.0.get()
+    }
+
+    const fn integer(factor: u16) -> Self {
+        match NonZeroU16::new(factor) {
+            Some(factor) => Self(factor),
+            None => Self::STANDARD,
+        }
     }
 }
 
@@ -731,6 +737,9 @@ mod tests {
 
     #[test]
     fn tempo_is_a_typed_serializable_stream_transition() {
+        assert_eq!(StoryTempo::TWOFOLD.factor(), 2);
+        assert_eq!(StoryTempo::FOURFOLD.factor(), 4);
+        assert_eq!(StoryTempo::EIGHTFOLD.factor(), 8);
         let event = StoryEvent::Cue(StoryCue::Tempo {
             tempo: StoryTempo::EIGHTFOLD,
         });
