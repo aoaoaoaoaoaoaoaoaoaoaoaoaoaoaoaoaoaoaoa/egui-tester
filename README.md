@@ -30,6 +30,10 @@ The ignored Wayland fixture owns a headless Weston launch-and-capture smoke. It
 has no native-input or acceptance-parity claim. Wayland remains deliberately
 frozen while the X11 pattern spreads to another application.
 
+`egui-tester-witness` is the portable product-side seam. Its journal and
+cross-process monotonic clock are release-tested on Linux, macOS, and Windows;
+the input, capture, and containment harness remains X11-specific.
+
 ## Containment
 
 Each application is a transient `systemd --user` service whose cgroup contains
@@ -164,9 +168,13 @@ scripts/test-x11
 
 The source gate deliberately excludes the host fixture. `scripts/test-x11`
 owns the release-tested X11 containment coordinate and runs both the doctor and
-the black-box fixture. CI schedules those same three evidence units and checks
-the publishable crates; it does not imply Wayland parity or portability beyond
-the documented X11 host.
+the black-box fixture. CI schedules those evidence units, checks both
+publishable crates, and runs the product-side witness on macOS and Windows. It
+does not imply Wayland or non-X11 harness parity.
+
+`scripts/release VERSION publish` is the sole publication entrypoint. It
+proves both packages, publishes the product-side witness first, waits until the
+registry can resolve it, then publishes the harness from the same signed tag.
 
 `egui-tester-doctor` verifies the canonical user manager, raises one isolated
 X11 universe, then destroys it. Trailgen is the reference full adoption:

@@ -17,8 +17,13 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+#[cfg(unix)]
 use rustix::time::{ClockId, clock_gettime};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(windows)]
+use std::sync::OnceLock;
+#[cfg(windows)]
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 pub const SCHEMA: u32 = 3;
 pub const PATH_ENV: &str = "EGUI_TESTER_WITNESS";
@@ -659,8 +664,9 @@ pub fn read_frame_journal(path: &Path, expected_launch: &str) -> Result<Vec<Fram
     Ok(samples)
 }
 
-/// Shared `CLOCK_MONOTONIC` epoch used for input-to-observation latency.
+/// Shared host-monotonic epoch used for input-to-observation latency.
 #[must_use]
+#[cfg(unix)]
 pub fn monotonic_ns() -> u64 {
     let now = clock_gettime(ClockId::Monotonic);
     u64::try_from(now.tv_sec)
@@ -668,6 +674,46 @@ pub fn monotonic_ns() -> u64 {
         .saturating_mul(1_000_000_000)
         .saturating_add(u64::try_from(now.tv_nsec).unwrap_or_default())
 }
+
+/// Shared host-monotonic epoch used for input-to-observation latency.
+#[must_use]
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "QueryPerformanceCounter is the Windows cross-process monotonic clock"
+)]
+pub fn monotonic_ns() -> u64 {
+    static FREQUENCY: OnceLock<u64> = OnceLock::new();
+
+    let mut count = 0_i64;
+    // SAFETY: the API receives a valid, uniquely borrowed pointer to initialized
+    // i64 storage and does not retain it.
+    let counter_ok = unsafe { QueryPerformanceCounter(&raw mut count) };
+    let frequency = *FREQUENCY.get_or_init(|| {
+        let mut frequency = 0_i64;
+        // SAFETY: the API receives a valid, uniquely borrowed pointer to
+        // initialized i64 storage and does not retain it.
+        let frequency_ok = unsafe { QueryPerformanceFrequency(&raw mut frequency) };
+        let Ok(frequency) = u64::try_from(frequency) else {
+            std::process::abort();
+        };
+        if frequency_ok == 0 || frequency == 0 {
+            std::process::abort();
+        }
+        frequency
+    });
+    let Ok(count) = u64::try_from(count) else {
+        std::process::abort();
+    };
+    if counter_ok == 0 {
+        std::process::abort();
+    }
+    u64::try_from(u128::from(count).saturating_mul(1_000_000_000) / u128::from(frequency))
+        .unwrap_or(u64::MAX)
+}
+
+#[cfg(not(any(unix, windows)))]
+compile_error!("egui-tester-witness requires a Unix or Windows monotonic host clock");
 
 fn open_frame_journal(path: &Path, launch: &str) -> Result<File> {
     if let Some(parent) = path.parent() {
