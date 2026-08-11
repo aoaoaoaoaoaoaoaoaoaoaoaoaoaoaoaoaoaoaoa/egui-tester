@@ -5,107 +5,26 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_INCREMENTAL: 0
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-  RUSTUP_TOOLCHAIN: 1.96.0
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  source:
-    name: Source and package contract
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install Rust 1.96
-        run: rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt
-      - name: Verify source
-        run: ./check.py verify
-      - name: Verify witness package
-        run: cargo package --locked --package egui-tester-witness
-      - name: Verify harness package
-        run: cargo package --locked --package egui-tester
+  harness:
+    name: Harness
+    permissions:
+      contents: read
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@9371c63453c0cee880ea76e07377f0854c3ce4d2
+    with:
+      namespace: harness
 
-  security:
-    name: Locked dependency audit
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install Rust 1.96
-        run: rustup toolchain install 1.96.0 --profile minimal
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
-      - name: Audit locked dependencies
-        run: scripts/audit
-
-  witness-hosts:
-    name: Witness · ${{ matrix.host }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - host: macOS arm64
-            runner: macos-15
-          - host: Windows x86_64
-            runner: windows-2025
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install Rust 1.96
-        run: rustup toolchain install 1.96.0 --profile minimal
-      - name: Prove the native witness clock
-        run: cargo test --locked --package egui-tester-witness --all-targets --all-features
-
-  x11:
-    name: X11 containment contract
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install native test substrate
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes \
-            bubblewrap \
-            dbus-user-session \
-            libxkbcommon-x11-0 \
-            mesa-vulkan-drivers \
-            xauth \
-            xvfb
-      - name: Admit contained user services
-        run: |
-          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
-            sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-          sudo sysctl --write kernel.unprivileged_userns_clone=1
-          sudo loginctl enable-linger "$USER"
-          sudo systemctl start "user@$(id -u).service"
-          runtime="/run/user/$(id -u)"
-          test -S "$runtime/bus"
-          printf 'XDG_RUNTIME_DIR=%s\n' "$runtime" >> "$GITHUB_ENV"
-          printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$runtime" >> "$GITHUB_ENV"
-      - name: Normalize software Vulkan
-        run: |
-          root="$RUNNER_TEMP/egui-tester-lavapipe"
-          library=$(find /usr/lib -name libvulkan_lvp.so -print -quit)
-          manifest=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
-          test -f "$library"
-          test -f "$manifest"
-          install -d "$root/usr/lib" "$root/usr/share/vulkan/icd.d"
-          ln -s "$library" "$root/usr/lib/libvulkan_lvp.so"
-          install -m 0644 "$manifest" "$root/usr/share/vulkan/icd.d/lvp_icd.json"
-          printf 'EGUI_TESTER_LAVAPIPE=%s\n' "$root" >> "$GITHUB_ENV"
-      - name: Install Rust 1.96
-        run: rustup toolchain install 1.96.0 --profile minimal
-      - name: Verify X11 host and containment
-        run: scripts/test-x11
+  witness:
+    name: Witness
+    permissions:
+      contents: read
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@9371c63453c0cee880ea76e07377f0854c3ce4d2
+    with:
+      contract: foundry-witness.toml
+      namespace: witness

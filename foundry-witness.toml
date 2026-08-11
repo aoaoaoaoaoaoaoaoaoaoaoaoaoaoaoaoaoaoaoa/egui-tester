@@ -1,0 +1,52 @@
+schema = 1
+
+[product]
+name = "egui-tester-witness"
+package = "egui-tester-witness"
+profile = "rust-library"
+
+[coordinates]
+release-tested = [
+  "linux-x86_64",
+  "macos-aarch64",
+  "macos-x86_64",
+  "windows-x86_64",
+]
+
+[[proofs]]
+name = "source"
+laws = ["source"]
+run = ["scripts/check-witness"]
+timeout-minutes = 20
+
+[[proofs]]
+name = "security"
+laws = ["security"]
+run = ["scripts/audit"]
+timeout-minutes = 15
+
+[[proofs]]
+name = "source-package"
+laws = ["source-package"]
+run = ["cargo", "package", "--locked", "--package", "egui-tester-witness"]
+timeout-minutes = 20
+
+[[proofs]]
+name = "host"
+laws = ["host"]
+run = [
+  "cargo",
+  "test",
+  "--locked",
+  "--package",
+  "egui-tester-witness",
+  "--all-targets",
+  "--all-features",
+]
+coordinates = [
+  "linux-x86_64",
+  "macos-aarch64",
+  "macos-x86_64",
+  "windows-x86_64",
+]
+timeout-minutes = 20

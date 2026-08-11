@@ -686,6 +686,7 @@ impl Weston {
         let log_path = root.join("logs/weston.log");
         let geometry = format!("{}x{}", config.width, config.height);
         let weston_runtime = WestonRuntime::resolve()?;
+        let fake_seat = weston_runtime.supports_fake_seat()?;
         let mut command = Command::new(&weston_runtime.weston);
         let _command = command
             .env_clear()
@@ -697,7 +698,9 @@ impl Weston {
                 "--renderer=pixman",
                 "--no-config",
                 "--idle-time=0",
-                "--fake-seat",
+                // Screenshooter is gated behind Weston's debug protocol. This
+                // compositor owns a unique socket beneath a mode-0700 root.
+                "--debug",
             ])
             .arg(format!("--socket={socket_name}"))
             .arg(format!("--width={}", config.width))
@@ -705,6 +708,9 @@ impl Weston {
             .arg(format!("--log={}", log_path.display()))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if fake_seat {
+            let _command = command.arg("--fake-seat");
+        }
         weston_runtime.apply_environment(&mut command);
         let mut child = command
             .spawn()
@@ -774,11 +780,12 @@ impl Weston {
                 err,
             )
         })?;
-        if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if !output.status.success() || !stderr.is_empty() {
             return Err(Error::Command {
                 command: "weston-screenshooter".to_owned(),
                 status: output.status.to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                stderr,
             });
         }
         let captures = fs::read_dir(&directory)
@@ -862,6 +869,28 @@ impl WestonRuntime {
             )
             .env("WESTON_MODULE_MAP", map)
             .env("WESTON_DATA_DIR", root.join("usr/share"));
+    }
+
+    fn supports_fake_seat(&self) -> Result<bool> {
+        let mut command = Command::new(&self.weston);
+        let _command = command.arg("--help").env_clear().env("PATH", "/usr/bin");
+        self.apply_environment(&mut command);
+        let output = command
+            .output()
+            .map_err(|err| io("inspect Weston capabilities", &self.weston, err))?;
+        if !output.status.success() {
+            return Err(Error::Command {
+                command: format!("{} --help", self.weston.display()),
+                status: output.status.to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok([output.stdout.as_slice(), output.stderr.as_slice()]
+            .into_iter()
+            .any(|help| {
+                help.split(|byte| byte.is_ascii_whitespace())
+                    .any(|word| word == b"--fake-seat")
+            }))
     }
 }
 

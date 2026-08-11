@@ -26,9 +26,9 @@ X11 is the complete, release-tested vertical:
   cadence contracts;
 - curated logs, private outputs, captures, and diagnostics on failure.
 
-The ignored Wayland fixture owns a headless Weston launch-and-capture smoke. It
-has no native-input or acceptance-parity claim. Wayland remains deliberately
-frozen while the X11 pattern spreads to another application.
+The Wayland coordinate owns a private headless Weston launch-and-capture smoke.
+It proves isolated first present and nonblack compositor output, but carries no
+native-input or acceptance-parity claim.
 
 `egui-tester-witness` is the portable product-side seam. Its journal and
 cross-process monotonic clock are release-tested on Linux, macOS, and Windows;
@@ -164,13 +164,15 @@ the tester.
 ./check.py verify
 scripts/audit
 scripts/test-x11
+scripts/test-wayland
 ```
 
 The source gate deliberately excludes the host fixture. `scripts/test-x11`
-owns the release-tested X11 containment coordinate and runs both the doctor and
-the black-box fixture. CI schedules those evidence units, checks both
-publishable crates, and runs the product-side witness on macOS and Windows. It
-does not imply Wayland or non-X11 harness parity.
+owns the complete X11 containment coordinate and runs both the doctor and the
+black-box fixture. `scripts/test-wayland` owns only isolated compositor launch,
+first present, and capture. CI judges those Linux harness proofs separately
+from the portable witness matrix on Linux, both macOS architectures, and
+Windows. It does not imply Wayland input or acceptance parity.
 
 `scripts/release VERSION publish` is the sole publication entrypoint. It
 proves both packages, publishes the product-side witness first, waits until the
