@@ -15,8 +15,8 @@ jobs:
   harness:
     name: Harness
     permissions:
-      contents: write
-    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@c56eab169403d94596c0bce8925dcc1938eb74c5
+      contents: read
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@434df1d663ea0cf4e8836dc7235b9fdc4a1d6a1b
     with:
       namespace: harness
       publish: false
@@ -24,8 +24,8 @@ jobs:
   witness:
     name: Witness
     permissions:
-      contents: write
-    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@c56eab169403d94596c0bce8925dcc1938eb74c5
+      contents: read
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@434df1d663ea0cf4e8836dc7235b9fdc4a1d6a1b
     with:
       contract: foundry-witness.toml
       namespace: witness
