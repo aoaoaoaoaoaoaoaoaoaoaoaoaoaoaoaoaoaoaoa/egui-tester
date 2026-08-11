@@ -12,12 +12,12 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/egui-tester"
 rust-version = "1.96"
-version = "0.6.1"
+version = "0.6.2"
 
 [workspace.dependencies]
 bitflags = "2.13.1"
 egui = "0.34.3"
-egui-tester-witness = { path = "crates/egui-tester-witness", version = "0.6.0" }
+egui-tester-witness = { path = "crates/egui-tester-witness", version = "0.6.2" }
 png = "0.18.0"
 rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
 serde = { version = "1.0.219", features = ["derive"] }

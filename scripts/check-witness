@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+cargo fmt --all --check
+cargo clippy --locked --package egui-tester-witness --all-targets --all-features
+cargo test --locked --package egui-tester-witness --all-targets --all-features

@@ -29,7 +29,7 @@ case "$mode" in
     *) die "invalid mode: $mode" ;;
 esac
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
 [ "$(git branch --show-current)" = main ] || die 'release checkout is not main'
@@ -41,11 +41,11 @@ grep -Fqx "version = \"$version\"" Cargo.toml ||
 git tag --points-at HEAD | grep -Fqx "v$version" || die "v$version does not tag HEAD"
 git tag -v "v$version" >/dev/null 2>&1 || die "v$version is not a valid signed tag"
 
-./check.py verify
+scripts/check
 scripts/audit
 scripts/test-x11
-cargo package --locked --package egui-tester-witness
-cargo package --locked --package egui-tester
+scripts/test-wayland
+scripts/package
 
 if [ "$mode" = publish ]; then
     cargo publish --locked --package egui-tester-witness

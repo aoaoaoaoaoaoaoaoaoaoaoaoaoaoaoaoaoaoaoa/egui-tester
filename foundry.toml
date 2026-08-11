@@ -1,0 +1,55 @@
+schema = 1
+
+[product]
+name = "egui-tester"
+package = "egui-tester"
+profile = "rust-library"
+
+[coordinates]
+release-tested = ["linux-x86_64"]
+
+[[exclusions]]
+coordinate = "macos-aarch64"
+reason = "The containment and input harness requires Linux namespaces, systemd, X11, and Weston."
+
+[[exclusions]]
+coordinate = "macos-x86_64"
+reason = "The containment and input harness requires Linux namespaces, systemd, X11, and Weston."
+
+[[exclusions]]
+coordinate = "windows-x86_64"
+reason = "The containment and input harness requires Linux namespaces, systemd, X11, and Weston."
+
+[[proofs]]
+name = "source"
+laws = ["source"]
+run = ["scripts/check"]
+timeout-minutes = 30
+
+[[proofs]]
+name = "security"
+laws = ["security"]
+run = ["scripts/audit"]
+timeout-minutes = 15
+
+[[proofs]]
+name = "source-package"
+laws = ["source-package"]
+run = ["scripts/package"]
+timeout-minutes = 30
+
+[[proofs]]
+name = "host-x11"
+laws = ["host"]
+run = ["bash", "scripts/test-x11"]
+coordinates = ["linux-x86_64"]
+setup = "x11"
+timeout-minutes = 45
+
+[[proofs]]
+name = "host-wayland"
+laws = ["host"]
+run = ["bash", "scripts/test-wayland"]
+coordinates = ["linux-x86_64"]
+setup = "wayland"
+timeout-minutes = 45

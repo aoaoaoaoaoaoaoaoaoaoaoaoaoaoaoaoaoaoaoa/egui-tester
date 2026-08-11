@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+artifacts=${EGUI_TESTER_FAILURE_ARTIFACTS:-${FOUNDRY_EVIDENCE_DIR:-target/wayland-failures}}
+export EGUI_TESTER_FAILURE_ARTIFACTS="$artifacts"
+
+cargo test --locked --package egui-tester-fixture --test wayland \
+    -- --ignored --exact launches_and_captures_on_headless_wayland
