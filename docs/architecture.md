@@ -80,7 +80,7 @@ length-framed record contains:
 - schema and launch identity;
 - product frame and surface sequence;
 - frame-begin, observation, and surface-present monotonic timestamps;
-- physical scale and target rectangles;
+- physical scale, target rectangles, and presented egui focus where recorded;
 - deliberately selected product state.
 
 There is no atomic latest-state twin. `Probe<S>` incrementally consumes all
@@ -104,7 +104,7 @@ Every wait is predicate-driven, bounded, and liveness-aware. Polling intervals
 are implementation detail, never choreography. A caller may await:
 
 - a uniquely selected viewable window;
-- a target or state predicate in a complete observation;
+- a target, target focus, or state predicate in a complete observation;
 - projection stability for a declared quiet interval;
 - a private durable effect;
 - changed pixels in a named region.

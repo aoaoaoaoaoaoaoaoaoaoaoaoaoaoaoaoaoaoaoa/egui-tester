@@ -51,6 +51,8 @@ if [ "$mode" = publish ]; then
     cargo publish --locked --package egui-tester-witness
     await_registry egui-tester-witness "$version"
     cargo publish --locked --package egui-tester
+    await_registry egui-tester "$version"
+    cargo publish --locked --package egui-demo
 else
     printf 'release candidate v%s is clean and packaged; publication was not requested\n' "$version"
 fi

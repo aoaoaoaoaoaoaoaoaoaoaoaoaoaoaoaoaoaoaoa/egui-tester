@@ -1106,6 +1106,7 @@ impl Key {
                 }
                 Keysym::new(u32::from(character))
             }
+            Self::Space => Keysym::new(u32::from(' ')),
             Self::Return => Keysym::Return,
             Self::Escape => Keysym::Escape,
             Self::Tab => Keysym::Tab,
@@ -1164,5 +1165,18 @@ fn x11(operation: &'static str, error: impl std::fmt::Display) -> Error {
     Error::X11 {
         operation,
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_has_an_explicit_portable_keysym() {
+        assert_eq!(
+            Key::Space.keysym().ok().map(Keysym::raw),
+            Some(u32::from(' '))
+        );
     }
 }

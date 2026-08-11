@@ -1,9 +1,9 @@
 //! Hermetic, black-box end-to-end control for native GUI applications.
 //!
 //! The harness injects real display-server input and judges rendered pixels or
-//! external product effects. Optional witnesses may locate controls and
-//! synchronize frames, but they are deliberately incapable of mutating the
-//! application.
+//! external product effects. Optional witnesses may locate controls, report
+//! presented focus, and synchronize frames, but they are deliberately
+//! incapable of mutating the application.
 
 mod condition;
 mod error;

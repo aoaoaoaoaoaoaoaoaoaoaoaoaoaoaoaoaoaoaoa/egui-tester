@@ -11,8 +11,8 @@ not verdicts.
 X11 is the complete, release-tested vertical:
 
 - authenticated private Xvfb, never the caller's `DISPLAY`;
-- XTEST clicks, held-button drags, strokes, wheels, modifiers, function keys,
-  and Latin-1 keyboard input;
+- XTEST clicks, held-button drags, strokes, wheels, modifiers, named navigation
+  keys including Space, function keys, and Latin-1 keyboard input;
 - exact window discovery, focus, RGBA capture, tolerant regional pixel
   comparison, and PNG artifacts;
 - a private XDG tree, mount and network namespaces, a transient user-service
@@ -57,11 +57,16 @@ application.
 ## Evidence Model
 
 A **witness** answers “where is this target?” or “does a later product
-observation have this shape?” The standard witness is one append-only,
+observation have this shape?” It may also report which recorded egui response
+owned focus in the presented pass. The standard witness is one append-only,
 length-framed semantic journal. Every record carries a launch seal, frame and
 surface sequence, monotonic product timestamps, scale, anchors, and
 application-selected state. `Probe` consumes every complete record in order;
 there is no competing latest-state file.
+
+`Probe::wait_focus` synchronizes on a named focus-bearing anchor. Focus remains
+a witness fact: the invoked command, rendered transition, or durable effect is
+still judged externally.
 
 An observation whose timestamps follow an input is temporally eligible. That
 does not prove the input caused it. A **verdict** therefore comes from pixels,
@@ -174,9 +179,10 @@ first present, and capture. CI judges those Linux harness proofs separately
 from the portable witness matrix on Linux, both macOS architectures, and
 Windows. It does not imply Wayland input or acceptance parity.
 
-`scripts/release VERSION publish` is the sole publication entrypoint. It
-proves both packages, publishes the product-side witness first, waits until the
-registry can resolve it, then publishes the harness from the same signed tag.
+`scripts/release VERSION publish` is the sole publication entrypoint. It proves
+the three publishable packages, then publishes the product-side witness,
+harness, and optional film observer in dependency order from the same signed
+tag, waiting at each registry boundary.
 
 `egui-tester-doctor` verifies the canonical user manager, raises one isolated
 X11 universe, then destroys it. Trailgen is the reference full adoption:

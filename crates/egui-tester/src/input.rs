@@ -24,6 +24,7 @@ bitflags::bitflags! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Key {
     Character(char),
+    Space,
     Return,
     Escape,
     Tab,

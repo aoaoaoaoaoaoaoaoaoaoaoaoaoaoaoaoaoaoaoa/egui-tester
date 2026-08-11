@@ -34,6 +34,12 @@ impl<S> ProbeFrame<S> {
     pub fn anchor(&self, name: &str) -> Option<&Anchor> {
         self.anchors.iter().find(|anchor| anchor.name == name)
     }
+
+    /// Find a named target only when it owns keyboard focus.
+    #[must_use]
+    pub fn focused_anchor(&self, name: &str) -> Option<&Anchor> {
+        self.anchor(name).filter(|anchor| anchor.focused)
+    }
 }
 
 /// Incremental reader for the standard sealed semantic journal.
@@ -217,6 +223,44 @@ impl<S: DeserializeOwned> Probe<S> {
             path: self.path.clone(),
             detail: format!("anchor `{name}` vanished from the matching frame"),
         })
+    }
+
+    /// Wait until a named target owns keyboard focus in a presented frame.
+    pub fn wait_focus(
+        &mut self,
+        app: &Application<'_>,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<Anchor> {
+        let frame = self.wait_checked(
+            app,
+            timeout,
+            format!("focus on witness anchor `{name}`"),
+            |frame| {
+                if frame.focused_anchor(name).is_some() {
+                    return Ok(());
+                }
+                let target = if frame.anchor(name).is_some() {
+                    "target is present but unfocused"
+                } else {
+                    "target is absent"
+                };
+                let focused = frame
+                    .anchors
+                    .iter()
+                    .filter(|anchor| anchor.focused)
+                    .map(|anchor| anchor.name.as_str())
+                    .collect::<Vec<_>>();
+                Err(format!("{target}; focused anchors: {focused:?}"))
+            },
+        )?;
+        frame
+            .focused_anchor(name)
+            .cloned()
+            .ok_or_else(|| Error::Probe {
+                path: self.path.clone(),
+                detail: format!("focused anchor `{name}` vanished from the matching frame"),
+            })
     }
 
     pub fn wait_fresh(
@@ -643,6 +687,29 @@ mod tests {
             state: Value::Null,
         };
         assert!(probe.validate(&frame).is_err());
+    }
+
+    #[test]
+    fn focused_anchor_requires_both_identity_and_focus() {
+        let frame = ProbeFrame {
+            schema: egui_tester_witness::SCHEMA,
+            launch: "launch".to_owned(),
+            frame: 1,
+            begun_ns: 1,
+            observed_ns: 2,
+            surface_presented_ns: 3,
+            surface_sequence: 1,
+            ppp: 1.0,
+            anchors: vec![
+                Anchor::physical("idle", [0.0, 0.0, 1.0, 1.0]).expect("idle anchor"),
+                Anchor::physical("active", [1.0, 1.0, 2.0, 2.0])
+                    .expect("active anchor")
+                    .with_focus(true),
+            ],
+            state: Value::Null,
+        };
+        assert!(frame.focused_anchor("idle").is_none());
+        assert!(frame.focused_anchor("active").is_some());
     }
 
     #[test]

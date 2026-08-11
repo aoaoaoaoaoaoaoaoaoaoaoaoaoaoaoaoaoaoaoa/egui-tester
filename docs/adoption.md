@@ -85,6 +85,13 @@ Instrumentation clears targets at every egui pass, so discarded layouts cannot
 leak rectangles into their replacements. Wire rectangles are physical,
 window-relative pixels.
 
+When an egui `Response` exists, publish it with
+`egui_tester_witness::egui::record_response`; this carries both its rectangle
+and `has_focus()` from the submitted pass. Use `record` or `record_rect` only
+for painter-owned geometry that cannot claim keyboard focus. Acceptance may
+use `Probe::wait_focus` to fence keyboard traversal. That focus bit remains a
+witness, not proof that the focused control performed its consequence.
+
 ## Story Law
 
 Scenarios are modules named for user intent, not widgets or implementation
