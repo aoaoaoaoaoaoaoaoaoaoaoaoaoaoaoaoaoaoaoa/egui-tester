@@ -812,8 +812,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-demo"
+version = "0.7.0"
+dependencies = [
+ "egui-tester",
+ "font8x8",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "egui-tester"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "bitflags 2.13.1",
  "egui-tester-witness",
@@ -829,14 +840,14 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-doctor"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "egui-tester",
 ]
 
 [[package]]
 name = "egui-tester-fixture"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "eframe",
  "egui-tester",
@@ -847,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-witness"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "egui",
  "rustix 1.1.4",
@@ -1098,6 +1109,12 @@ checksum = "5b38ad915f6dadd993ced50848a8291a543bd41ca62bc10740d5e64e2ab4cfd7"
 dependencies = [
  "bytemuck",
 ]
+
+[[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
 
 [[package]]
 name = "foreign-types"

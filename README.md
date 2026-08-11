@@ -11,8 +11,8 @@ not verdicts.
 X11 is the complete, release-tested vertical:
 
 - authenticated private Xvfb, never the caller's `DISPLAY`;
-- XTEST clicks, held-button drags, strokes, wheels, modifiers, function keys,
-  and Latin-1 keyboard input;
+- XTEST clicks, held-button drags, strokes, wheels, modifiers, named navigation
+  keys including Space, function keys, and Latin-1 keyboard input;
 - exact window discovery, focus, RGBA capture, tolerant regional pixel
   comparison, and PNG artifacts;
 - a private XDG tree, mount and network namespaces, a transient user-service
@@ -20,6 +20,8 @@ X11 is the complete, release-tested vertical:
 - launch-sealed semantic and frame journals through `egui-tester-witness`;
 - typed `Story<S>`, composable `Condition<S>`, and gesture `Reaction`
   porcelain;
+- a serializable live story stream whose optional consumers include films and
+  execution traces;
 - separate functional deadlines, reaction latency contracts, and sustained
   cadence contracts;
 - curated logs, private outputs, captures, and diagnostics on failure.
@@ -42,9 +44,10 @@ observations live beneath `/test`.
 
 Host data is absent by default. `AppCommand::borrow_read_only(path)` is the sole
 data aperture and has no writable counterpart. Network authority is denied
-unless declared. `Graphics::Software` uses the pinned lavapipe runtime;
-`Graphics::Host` admits only discovered GPU character devices plus read-only
-sysfs for representative performance runs.
+unless declared. `Graphics::Software` uses the pinned lavapipe runtime with a
+four-thread default, overridable through `LP_NUM_THREADS`. `Graphics::Host`
+admits only discovered GPU character devices plus read-only sysfs for
+representative performance runs.
 
 Harness-side product files should be read through `Testbed::read_private`.
 These capability operations use `openat2` beneath the private root and reject
@@ -54,11 +57,16 @@ application.
 ## Evidence Model
 
 A **witness** answers “where is this target?” or “does a later product
-observation have this shape?” The standard witness is one append-only,
+observation have this shape?” It may also report which recorded egui response
+owned focus in the presented pass. The standard witness is one append-only,
 length-framed semantic journal. Every record carries a launch seal, frame and
 surface sequence, monotonic product timestamps, scale, anchors, and
 application-selected state. `Probe` consumes every complete record in order;
 there is no competing latest-state file.
+
+`Probe::wait_focus` synchronizes on a named focus-bearing anchor. Focus remains
+a witness fact: the invoked command, rendered transition, or durable effect is
+still judged externally.
 
 An observation whose timestamps follow an input is temporally eligible. That
 does not prove the input caused it. A **verdict** therefore comes from pixels,
@@ -78,6 +86,31 @@ statistics come directly from product timestamps; there is no guessed
 instrumentation multiplier or post-hoc “witness tax” correction. Functional
 stories normally use deterministic software graphics. Host graphics alone
 adjudicates production GPU latency.
+
+## Optional Films
+
+`egui-demo` is an observer, not a second driver. Attach its `Recorder` to an
+ordinary `Story` before the first frame, then run the same effectful Rust
+scenario used by acceptance. Authored chapter, hold, and persistent tempo cues
+coexist with facts emitted by resolved targets, native actions, and matched
+observations. Tempo scales the recorder's automatic target, action, and
+observation beats; explicit chapter and hold durations remain literal. The
+observer encodes an H.264 film and a JSONL trace; `Silent` consumes the same
+stream at effectively zero cost during ordinary tests.
+
+The recorder samples the live product continuously against an invariant 60 fps
+film clock; ambient animation never degenerates into repeated semantic-event
+stills, and a tardy capture cannot dilate world time. `EncodingProfile::Proof`
+keeps routine recorded tests cheap, while `EncodingProfile::Showpiece` selects slow,
+animation-tuned compression for presentation artifacts. Showpiece capture is
+first sealed into a lossless RGB staging film, then transcoded offline; final
+compression therefore cannot throttle or distort the live story clock. End
+the story, terminate the product, then call `Recorder::publish` so the offline
+transcode never competes with an idle renderer.
+
+Recording is barred from production latency adjudication because synchronous
+capture changes wall time. The trace records what one execution did; it is not
+yet a promise that persisted facts can deterministically replay another run.
 
 ## Example
 
@@ -146,9 +179,10 @@ first present, and capture. CI judges those Linux harness proofs separately
 from the portable witness matrix on Linux, both macOS architectures, and
 Windows. It does not imply Wayland input or acceptance parity.
 
-`scripts/release VERSION publish` is the sole publication entrypoint. It
-proves both packages, publishes the product-side witness first, waits until the
-registry can resolve it, then publishes the harness from the same signed tag.
+`scripts/release VERSION publish` is the sole publication entrypoint. It proves
+the three publishable packages, then publishes the product-side witness,
+harness, and optional film observer in dependency order from the same signed
+tag, waiting at each registry boundary.
 
 `egui-tester-doctor` verifies the canonical user manager, raises one isolated
 X11 universe, then destroys it. Trailgen is the reference full adoption:

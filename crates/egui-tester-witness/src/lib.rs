@@ -1,8 +1,9 @@
 //! One-way, versioned semantic telemetry for black-box GUI tests.
 //!
 //! Applications publish immutable observations after presenting a frame. The
-//! harness may use them to locate controls and synchronize, never to mutate
-//! product state or substitute for an external oracle.
+//! harness may use them to locate controls, observe presented egui focus, and
+//! synchronize, never to mutate product state or substitute for an external
+//! oracle.
 
 use std::{
     collections::BTreeSet,
@@ -67,6 +68,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Anchor {
     pub name: String,
     pub rect: [f32; 4],
+    /// Whether this target owned keyboard focus in the presented egui pass.
+    ///
+    /// Additive-compatible older witnesses omit this field and therefore
+    /// deserialize as unfocused.
+    #[serde(default)]
+    pub focused: bool,
 }
 
 impl Anchor {
@@ -74,6 +81,7 @@ impl Anchor {
         let anchor = Self {
             name: name.into(),
             rect,
+            focused: false,
         };
         anchor.validate()?;
         Ok(anchor)
@@ -87,6 +95,13 @@ impl Anchor {
             });
         }
         Self::physical(name, rect.map(|coordinate| coordinate * pixels_per_point))
+    }
+
+    /// Attach the target's keyboard-focus state.
+    #[must_use]
+    pub const fn with_focus(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1011,12 +1026,12 @@ fn invalid_journal<T>(path: &Path, detail: impl Into<String>) -> Result<T> {
 #[cfg(feature = "egui")]
 pub mod egui {
     use super::{Anchor, Result};
-    use egui::{Context, Id, Rect, Ui, plugin::Plugin};
+    use egui::{Context, Id, Rect, Response, Ui, plugin::Plugin};
 
     const STORE: &str = "egui-tester-witness-anchors";
 
     #[derive(Clone, Default)]
-    struct Anchors(Vec<(String, Rect)>);
+    struct Anchors(Vec<(String, Rect, bool)>);
 
     #[derive(Default)]
     struct AnchorPass;
@@ -1050,12 +1065,21 @@ pub mod egui {
         record_rect(ui.ctx(), name, rect);
     }
 
+    /// Register one egui response, including whether it owns keyboard focus.
+    pub fn record_response(ui: &Ui, name: impl Into<String>, response: &Response) {
+        record_target(ui.ctx(), name, response.rect, response.has_focus());
+    }
+
     /// Register a semantic target from painter-only code.
     pub fn record_rect(ctx: &Context, name: impl Into<String>, rect: Rect) {
+        record_target(ctx, name, rect, false);
+    }
+
+    fn record_target(ctx: &Context, name: impl Into<String>, rect: Rect, focused: bool) {
         ctx.data_mut(|data| {
             data.get_temp_mut_or_default::<Anchors>(Id::new(STORE))
                 .0
-                .push((name.into(), rect));
+                .push((name.into(), rect, focused));
         });
     }
 
@@ -1065,12 +1089,13 @@ pub mod egui {
             .unwrap_or_default()
             .0
             .into_iter()
-            .map(|(name, rect)| {
+            .map(|(name, rect, focused)| {
                 Anchor::logical(
                     name,
                     [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
                     pixels_per_point,
                 )
+                .map(|anchor| anchor.with_focus(focused))
             })
             .collect()
     }

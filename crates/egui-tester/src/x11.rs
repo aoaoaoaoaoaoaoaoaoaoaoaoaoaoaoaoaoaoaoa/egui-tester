@@ -26,118 +26,17 @@ use x11rb::{
 };
 use xkeysym::Keysym;
 
-use crate::{ActionReceipt, Application, Error, Frame, PixelRegion, Probe, Result, Testbed};
+use crate::{
+    ActionReceipt, Application, Button, Drag, Error, Frame, Key, Modifiers, Motion, PixelRegion,
+    Probe, Result, Stroke, Testbed, Wheel,
+};
 
+mod pixels;
 mod window;
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
 const MODIFIER_GUARD: Duration = Duration::from_millis(32);
 const POINTER_DELIVERY_GUARD: Duration = Duration::from_millis(32);
-
-/// X11 mouse button.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Button {
-    Primary = 1,
-    Middle = 2,
-    Secondary = 3,
-}
-
-bitflags::bitflags! {
-    /// Keyboard modifiers held around one atomic input gesture.
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    pub struct Modifiers: u8 {
-        const SHIFT = 1 << 0;
-        const CTRL = 1 << 1;
-        const ALT = 1 << 2;
-        const SUPER = 1 << 3;
-    }
-}
-
-/// Portable key subset plus Latin-1 characters.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Key {
-    Character(char),
-    Return,
-    Escape,
-    Tab,
-    Backspace,
-    Delete,
-    Home,
-    End,
-    Left,
-    Right,
-    Up,
-    Down,
-    Function(u8),
-    Shift,
-    Control,
-    Alt,
-    Super,
-}
-
-/// Human-like pointer drag policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Drag {
-    pub button: Button,
-    /// Time allowed for the application to acquire the pressed target before motion.
-    pub press_duration: Duration,
-    pub steps: u16,
-    /// Total time spent transporting the pointer after acquisition.
-    pub duration: Duration,
-}
-
-/// Timed polyline traversed while one pointer button remains held.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Stroke {
-    pub button: Button,
-    /// Time allowed for the application to acquire the pressed target.
-    pub press_duration: Duration,
-    pub steps_per_leg: u16,
-    pub leg_duration: Duration,
-    /// Dwell at each knot before beginning the next leg.
-    ///
-    /// Use this when the product must observe polyline corners despite native
-    /// motion coalescing. The final dwell precedes button release.
-    pub knot_dwell: Duration,
-}
-
-impl Default for Stroke {
-    fn default() -> Self {
-        Self {
-            button: Button::Primary,
-            press_duration: Duration::from_millis(32),
-            steps_per_leg: 8,
-            leg_duration: Duration::from_millis(120),
-            knot_dwell: Duration::ZERO,
-        }
-    }
-}
-
-/// Timed wheel gesture; each tick reaches the product as a distinct input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Wheel {
-    pub tick_duration: Duration,
-}
-
-impl Default for Wheel {
-    fn default() -> Self {
-        Self {
-            tick_duration: Duration::from_millis(24),
-        }
-    }
-}
-
-impl Default for Drag {
-    fn default() -> Self {
-        Self {
-            button: Button::Primary,
-            press_duration: Duration::from_millis(32),
-            steps: 8,
-            duration: Duration::from_millis(120),
-        }
-    }
-}
 
 /// Top-level window selection law.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -348,6 +247,38 @@ impl X11Controller {
         self.flush("move pointer")
     }
 
+    pub fn pointer(&self, window: &Window) -> Result<(i16, i16)> {
+        let reply = self
+            .connection
+            .query_pointer(window.id)
+            .map_err(|err| x11("query pointer", err))?
+            .reply()
+            .map_err(|err| x11("query pointer", err))?;
+        Ok((reply.win_x, reply.win_y))
+    }
+
+    pub fn motion(
+        &self,
+        window: &Window,
+        from: (i16, i16),
+        to: (i16, i16),
+        policy: Motion,
+    ) -> Result<ActionReceipt> {
+        if policy.steps == 0 {
+            return Err(Error::X11 {
+                operation: "transport pointer",
+                detail: "pointer motion requires at least one step".to_owned(),
+            });
+        }
+        self.move_to(window, from.0, from.1)?;
+        let receipt = ActionReceipt::begin(format!(
+            "pointer motion ({}, {}) → ({}, {})",
+            from.0, from.1, to.0, to.1
+        ));
+        self.transport(window, from, to, policy.steps, policy.duration)?;
+        Ok(receipt.trigger().finish())
+    }
+
     pub fn click(&self, window: &Window, x: i16, y: i16, button: Button) -> Result<ActionReceipt> {
         self.modified_click(window, x, y, button, Modifiers::empty())
     }
@@ -362,7 +293,11 @@ impl X11Controller {
     ) -> Result<ActionReceipt> {
         self.move_to(window, x, y)?;
         let held = self.press_modifiers(modifiers)?;
-        self.flush("acquire click modifiers")?;
+        if let Err(err) = self.flush("acquire click modifiers") {
+            self.release_keycodes(&held);
+            let _flushed = self.flush("recover click modifiers");
+            return Err(err);
+        }
         if !held.is_empty() {
             thread::sleep(MODIFIER_GUARD);
         }
@@ -450,6 +385,34 @@ impl X11Controller {
             thread::sleep(POINTER_DELIVERY_GUARD);
         }
         Ok(receipt)
+    }
+
+    pub fn modified_wheel(
+        &self,
+        window: &Window,
+        x: i16,
+        y: i16,
+        vertical_ticks: i32,
+        policy: Wheel,
+        modifiers: Modifiers,
+    ) -> Result<ActionReceipt> {
+        self.move_to(window, x, y)?;
+        let held = self.press_modifiers(modifiers)?;
+        if let Err(err) = self.flush("acquire wheel modifiers") {
+            self.release_keycodes(&held);
+            let _flushed = self.flush("recover wheel modifiers");
+            return Err(err);
+        }
+        if !held.is_empty() {
+            thread::sleep(MODIFIER_GUARD);
+        }
+        let result = self.wheel(window, x, y, vertical_ticks, policy);
+        self.release_keycodes(&held);
+        let released = self.flush("release wheel modifiers");
+        let receipt = result?;
+        released?;
+        let action = format!("{modifiers:?} {}", receipt.action());
+        Ok(receipt.relabel(action))
     }
 
     pub fn key(&self, key: Key) -> Result<ActionReceipt> {
@@ -573,27 +536,20 @@ impl X11Controller {
         if !policy.press_duration.is_zero() {
             thread::sleep(policy.press_duration);
         }
-        let pause = policy.leg_duration / u32::from(policy.steps_per_leg);
         for leg in knots.windows(2) {
             let [from, to] = leg else {
                 continue;
             };
-            for step in 1..=policy.steps_per_leg {
-                let fraction = f64::from(step) / f64::from(policy.steps_per_leg);
-                let x = f64::from(from.0)
-                    .mul_add(1.0 - fraction, f64::from(to.0) * fraction)
-                    .round() as i16;
-                let y = f64::from(from.1)
-                    .mul_add(1.0 - fraction, f64::from(to.1) * fraction)
-                    .round() as i16;
-                if let Err(err) = self.move_to(window, x, y) {
-                    let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
-                    let _flushed = self.flush("abort pointer stroke");
-                    return Err(err);
-                }
-                if step < policy.steps_per_leg && !pause.is_zero() {
-                    thread::sleep(pause);
-                }
+            if let Err(err) = self.transport(
+                window,
+                *from,
+                *to,
+                policy.steps_per_leg,
+                policy.leg_duration,
+            ) {
+                let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
+                let _flushed = self.flush("abort pointer stroke");
+                return Err(err);
             }
             if !policy.knot_dwell.is_zero() {
                 thread::sleep(policy.knot_dwell);
@@ -607,6 +563,31 @@ impl X11Controller {
         }
         self.flush("finish pointer stroke")?;
         Ok(receipt.finish())
+    }
+
+    fn transport(
+        &self,
+        window: &Window,
+        from: (i16, i16),
+        to: (i16, i16),
+        steps: u16,
+        duration: Duration,
+    ) -> Result<()> {
+        let pause = duration / u32::from(steps);
+        for step in 1..=steps {
+            let fraction = f64::from(step) / f64::from(steps);
+            let x = f64::from(from.0)
+                .mul_add(1.0 - fraction, f64::from(to.0) * fraction)
+                .round() as i16;
+            let y = f64::from(from.1)
+                .mul_add(1.0 - fraction, f64::from(to.1) * fraction)
+                .round() as i16;
+            self.move_to(window, x, y)?;
+            if step < steps && !pause.is_zero() {
+                thread::sleep(pause);
+            }
+        }
+        Ok(())
     }
 
     pub fn capture(&self, window: &Window) -> Result<Frame> {
@@ -643,19 +624,7 @@ impl X11Controller {
                 operation: "decode window pixels",
                 detail: format!("server omitted visual {visual_id:#x}"),
             })?;
-        let capacity = usize::from(geometry.width) * usize::from(geometry.height) * 4;
-        let mut rgba = Vec::with_capacity(capacity);
-        for y in 0..geometry.height {
-            for x in 0..geometry.width {
-                let pixel = image.get_pixel(x, y);
-                rgba.extend([
-                    channel(pixel, visual.red_mask),
-                    channel(pixel, visual.green_mask),
-                    channel(pixel, visual.blue_mask),
-                    255,
-                ]);
-            }
-        }
+        let rgba = pixels::decode(&image, visual.red_mask, visual.green_mask, visual.blue_mask);
         Ok(Frame::new(
             u32::from(geometry.width),
             u32::from(geometry.height),
@@ -893,6 +862,19 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         Ok(receipt)
     }
 
+    pub fn pointer(&self) -> Result<(i16, i16)> {
+        self.app.ensure_running("query pointer")?;
+        self.controller.pointer(&self.window)
+    }
+
+    pub fn motion(&self, to: (i16, i16), policy: Motion) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer transport")?;
+        let from = self.controller.pointer(&self.window)?;
+        let receipt = self.controller.motion(&self.window, from, to, policy)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
     pub fn modified_click(
         &self,
         x: i16,
@@ -982,11 +964,34 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         Ok(receipt)
     }
 
+    pub fn modified_wheel(
+        &self,
+        x: i16,
+        y: i16,
+        ticks: i32,
+        policy: Wheel,
+        modifiers: Modifiers,
+    ) -> Result<ActionReceipt> {
+        self.app.ensure_running("modified pointer wheel gesture")?;
+        let receipt =
+            self.controller
+                .modified_wheel(&self.window, x, y, ticks, policy, modifiers)?;
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
     pub fn capture(&self) -> Result<Frame> {
-        self.app.ensure_running("window capture")?;
-        let frame = self.controller.capture(&self.window)?;
+        let frame = self.capture_ephemeral()?;
         self.remember(&frame)?;
         Ok(frame)
+    }
+
+    /// Capture product pixels without serializing the diagnostic latest-frame
+    /// PNG. Stream observers already own the returned frame; persisting every
+    /// sample would put PNG compression in their temporal hot path.
+    pub(crate) fn capture_ephemeral(&self) -> Result<Frame> {
+        self.app.ensure_running("window capture")?;
+        self.controller.capture(&self.window)
     }
 
     /// Wait for the standard surface-present cue, then sample product pixels.
@@ -1101,6 +1106,7 @@ impl Key {
                 }
                 Keysym::new(u32::from(character))
             }
+            Self::Space => Keysym::new(u32::from(' ')),
             Self::Return => Keysym::Return,
             Self::Escape => Keysym::Escape,
             Self::Tab => Keysym::Tab,
@@ -1155,18 +1161,22 @@ pub(crate) fn connect_authenticated(socket: &Path, cookie: &[u8]) -> Result<Rust
     Ok(connection)
 }
 
-fn channel(pixel: u32, mask: u32) -> u8 {
-    if mask == 0 {
-        return 0;
-    }
-    let value = (pixel & mask) >> mask.trailing_zeros();
-    let maximum = mask >> mask.trailing_zeros();
-    ((value * 255 + maximum / 2) / maximum) as u8
-}
-
 fn x11(operation: &'static str, error: impl std::fmt::Display) -> Error {
     Error::X11 {
         operation,
         detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn space_has_an_explicit_portable_keysym() {
+        assert_eq!(
+            Key::Space.keysym().ok().map(Keysym::raw),
+            Some(u32::from(' '))
+        );
     }
 }

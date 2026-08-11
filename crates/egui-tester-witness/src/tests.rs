@@ -13,6 +13,14 @@ fn logical_rectangles_become_physical() {
     let anchor =
         Anchor::logical("blade", [1.0, 2.0, 3.0, 4.0], 1.5).expect("forge physical anchor");
     assert_eq!(anchor.rect, [1.5, 3.0, 4.5, 6.0]);
+    assert!(!anchor.focused);
+}
+
+#[test]
+fn additive_legacy_anchor_defaults_to_unfocused() {
+    let anchor: Anchor =
+        serde_json::from_str(r#"{"name":"blade","rect":[0,0,1,1]}"#).expect("decode legacy anchor");
+    assert!(!anchor.focused);
 }
 
 #[test]
@@ -176,4 +184,23 @@ fn discarded_egui_passes_leave_only_the_presented_targets() {
     assert_eq!(pass, 2);
     assert_eq!(anchors.len(), 1);
     assert_eq!(anchors[0].rect, [2.0, 0.0, 3.0, 1.0]);
+}
+
+#[cfg(feature = "egui")]
+#[test]
+fn egui_responses_publish_keyboard_focus() {
+    use ::egui::{Context, RawInput};
+
+    let ctx = Context::default();
+    egui::install(&ctx);
+    let _output = ctx.run_ui(RawInput::default(), |ui| {
+        let first = ui.button("first");
+        first.request_focus();
+        egui::record_response(ui, "first", &first);
+        let second = ui.button("second");
+        egui::record_response(ui, "second", &second);
+    });
+    let anchors = egui::take(&ctx, 1.0).expect("focused response anchors");
+    assert!(anchors[0].focused);
+    assert!(!anchors[1].focused);
 }

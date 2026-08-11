@@ -45,6 +45,21 @@ Functional stories use deterministic software graphics and
 latency. A functional deadline is not a disguised generous performance
 threshold.
 
+An optional film is another consumer of the functional story, never another
+choreography engine. Attach `egui_demo::Recorder` before `Story::ready`, place
+editorial `chapter`, `hold`, and persistent `tempo` cues in the scenario, and
+call `Story::finish` after the verdict. Tempo scales automatic recorder beats,
+not explicit chapter or hold durations. Terminate the product, then call
+`Recorder::publish`; this keeps offline compression outside the live
+application lifecycle. The same scenario function must remain callable with
+`Silent`.
+Recording observers are rejected on production performance rails. The recorder
+samples continuously against its invariant film clock; use
+`EncodingProfile::Proof` for routine evidence and opt presentation artifacts
+into `EncodingProfile::Showpiece`.
+The latter records through a lossless RGB staging film before its slow final
+transcode, preserving real-time sampling under expensive compression.
+
 ## Publisher Lifecycle
 
 One product frame follows this order:
@@ -70,6 +85,13 @@ Instrumentation clears targets at every egui pass, so discarded layouts cannot
 leak rectangles into their replacements. Wire rectangles are physical,
 window-relative pixels.
 
+When an egui `Response` exists, publish it with
+`egui_tester_witness::egui::record_response`; this carries both its rectangle
+and `has_focus()` from the submitted pass. Use `record` or `record_rect` only
+for painter-owned geometry that cannot claim keyboard focus. Acceptance may
+use `Probe::wait_focus` to fence keyboard traversal. That focus bit remains a
+witness, not proof that the focused control performed its consequence.
+
 ## Story Law
 
 Scenarios are modules named for user intent, not widgets or implementation
@@ -87,14 +109,11 @@ The witness may say a route signature changed. Persisted geometry or visible
 pixels decide whether routing worked. A post-trigger frame is not called
 “caused” merely because no earlier frame matched.
 
-Fast native batches still preserve gesture integrity. Modified clicks fence
-modifier press and release. Custom canvas drags should use:
-
-1. `button_down` on the witnessed target;
-2. wait for product acquisition;
-3. `move_to` and wait for recomputation;
-4. judge pixels or durable geometry;
-5. `button_up` and wait for release.
+Fast native batches still preserve gesture integrity. Modified clicks and
+wheels fence modifier press and release. Layout-sensitive drags should use
+`Story::drag_to`, which acquires the witnessed source, waits for a fresh frame,
+resolves the destination after acquisition, and attempts release on every
+error path.
 
 This tests pointer capture without scheduler sleeps. Product kinetics such as
 smoothed zoom use projection-scoped `Probe::wait_stable` before a baseline is

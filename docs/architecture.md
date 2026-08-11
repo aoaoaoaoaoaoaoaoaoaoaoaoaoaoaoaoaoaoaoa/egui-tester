@@ -12,6 +12,9 @@ synchronization.
 
 **Oracle** is external product evidence used for a verdict.
 
+**Story** is the effectful, typed program that drives one application and emits
+a causal stream of authored cues and immutable execution facts.
+
 **Borrow** is a live host path deliberately exposed read-only. It never means a
 writable mount, overlay, or redirection.
 
@@ -77,7 +80,7 @@ length-framed record contains:
 - schema and launch identity;
 - product frame and surface sequence;
 - frame-begin, observation, and surface-present monotonic timestamps;
-- physical scale and target rectangles;
+- physical scale, target rectangles, and presented egui focus where recorded;
 - deliberately selected product state.
 
 There is no atomic latest-state twin. `Probe<S>` incrementally consumes all
@@ -101,7 +104,7 @@ Every wait is predicate-driven, bounded, and liveness-aware. Polling intervals
 are implementation detail, never choreography. A caller may await:
 
 - a uniquely selected viewable window;
-- a target or state predicate in a complete observation;
+- a target, target focus, or state predicate in a complete observation;
 - projection stability for a declared quiet interval;
 - a private durable effect;
 - changed pixels in a named region.
@@ -120,6 +123,29 @@ pixel or external oracle.
 Structural layout changes should request an egui discard pass. Application
 instrumentation must clear targets at every pass and publish only the
 replacement pass that was actually submitted.
+
+## Story Stream
+
+`Story` is deliberately not an eager action vector. It executes native input
+and semantic waits while emitting `StoryEvent` items synchronously in causal
+order. `StoryCue` carries authored editorial intent: chapters, literal holds,
+and persistent choreography tempo. `StoryFact` carries resolved target
+geometry, dispatched input receipts, and matched observation identity. A
+consumer sees only a capture-capable view of the product surface and gains no
+mutation authority.
+
+Ordinary acceptance attaches `Silent`; film production attaches
+`egui_demo::Recorder`. Both run the same scenario, so a recorded take remains
+an acceptance execution rather than an independently scheduled imitation. The
+recorder samples the product continuously against an invariant output clock so
+ambient animation remains temporally honest between semantic events, even when
+a capture misses one tick. The showpiece rail keeps that live clock upstream of
+compression by staging lossless RGB and performing the expensive presentation
+transcode only after story execution and product teardown. `Story::finish`
+seals live capture; `Recorder::publish` owns only offline artifact work.
+Facts are serializable provenance, not executable commands. Deterministic
+replay remains a separate policy problem because targets may move and waits
+may resolve along different lawful paths.
 
 ## Timing
 
@@ -159,5 +185,5 @@ cannot express.
 
 Other named gaps are multi-window and native-dialog choreography, tray
 surfaces, window move/resize, clipboard and IME input, text beyond Latin-1, and
-a serializable action timeline for recording. A product must park a dependent
-story rather than smuggle xdotool or ambient desktop authority back in.
+replay policy for persisted story traces. A product must park a dependent story
+rather than smuggle xdotool or ambient desktop authority back in.
