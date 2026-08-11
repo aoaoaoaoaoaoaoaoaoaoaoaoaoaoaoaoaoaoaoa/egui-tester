@@ -9,24 +9,22 @@ permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   harness:
     name: Harness
     permissions:
       contents: read
-    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@434df1d663ea0cf4e8836dc7235b9fdc4a1d6a1b
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@a4aa93aa3981a6238c6fdd0e29970916e432f953
     with:
       namespace: harness
-      publish: false
 
   witness:
     name: Witness
     permissions:
       contents: read
-    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@434df1d663ea0cf4e8836dc7235b9fdc4a1d6a1b
+    uses: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry/.github/workflows/pipeline.yml@a4aa93aa3981a6238c6fdd0e29970916e432f953
     with:
       contract: foundry-witness.toml
       namespace: witness
-      publish: false
