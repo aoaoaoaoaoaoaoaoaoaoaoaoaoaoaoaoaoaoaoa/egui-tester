@@ -183,7 +183,9 @@ where its stable author IDs, roles, names, values, focus, and bounds suffice.
 Product-specific observations will remain for facts an accessibility tree
 cannot express.
 
-Other named gaps are multi-window and native-dialog choreography, tray
-surfaces, window move/resize, clipboard and IME input, text beyond Latin-1, and
-replay policy for persisted story traces. A product must park a dependent story
-rather than smuggle xdotool or ambient desktop authority back in.
+Other named gaps are native-dialog choreography, window move/resize, clipboard
+and IME input, text beyond Latin-1, and replay policy for persisted story
+traces. Named X11 windows, including tray surfaces, may be driven directly;
+embedded-window eviction and redock are first-class controller operations. A
+product must park any remaining dependent story rather than smuggle xdotool or
+ambient desktop authority back in.

@@ -31,6 +31,7 @@ use crate::{
     Probe, Result, Stroke, Testbed, Wheel,
 };
 
+mod embedded;
 mod pixels;
 mod window;
 
