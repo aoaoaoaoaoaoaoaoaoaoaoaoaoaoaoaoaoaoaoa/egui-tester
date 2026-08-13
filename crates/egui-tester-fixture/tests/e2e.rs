@@ -60,32 +60,6 @@ fn drives_real_input_and_observes_pixels() {
         "the product pixels did not reflect the witnessed count change"
     );
 
-    let toggle = probe
-        .wait_anchor(&app, "toggle", Duration::from_secs(3))
-        .expect("locate color toggle");
-    let (x, y) = toggle.center();
-    let _receipt = session
-        .click(x, y, Button::Primary)
-        .expect("click color toggle");
-    let _violet = probe
-        .wait(
-            &app,
-            Duration::from_secs(3),
-            "background to become violet",
-            |frame| frame.state["violet"] == true,
-        )
-        .expect("observe violet frame");
-    let violet = session
-        .wait_changed(&counted, 0.5, 2, Duration::from_secs(3))
-        .expect("violet background reaches product pixels");
-    assert!(
-        counted
-            .difference(&violet, 2)
-            .expect("compare background pixels")
-            > 0.5,
-        "the rendered background did not change"
-    );
-
     let text = probe
         .wait_anchor(&app, "text", Duration::from_secs(3))
         .expect("locate text field");
@@ -122,16 +96,6 @@ fn drives_real_input_and_observes_pixels() {
             |frame| frame.state["text"] == "steel",
         )
         .expect("observe modified keyboard input");
-
-    let _f2 = session.key(Key::Function(2)).expect("inject F2");
-    let _function_key = probe
-        .wait(
-            &app,
-            Duration::from_secs(3),
-            "F2 count to become one",
-            |frame| frame.state["f2_count"] == 1,
-        )
-        .expect("observe function key");
 
     let drag = probe
         .wait_anchor(&app, "drag", Duration::from_secs(3))

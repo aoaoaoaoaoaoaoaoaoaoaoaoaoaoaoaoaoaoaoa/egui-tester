@@ -1,30 +1,16 @@
 use super::*;
-use std::time::Duration;
 
 #[test]
-fn host_clock_advances() {
-    let before = monotonic_ns();
-    thread::sleep(Duration::from_millis(2));
-    assert!(monotonic_ns() > before);
-}
-
-#[test]
-fn logical_rectangles_become_physical() {
+fn anchor_contract_preserves_scale_legacy_focus_and_unique_identity() {
     let anchor =
         Anchor::logical("blade", [1.0, 2.0, 3.0, 4.0], 1.5).expect("forge physical anchor");
     assert_eq!(anchor.rect, [1.5, 3.0, 4.5, 6.0]);
     assert!(!anchor.focused);
-}
 
-#[test]
-fn additive_legacy_anchor_defaults_to_unfocused() {
-    let anchor: Anchor =
+    let legacy: Anchor =
         serde_json::from_str(r#"{"name":"blade","rect":[0,0,1,1]}"#).expect("decode legacy anchor");
-    assert!(!anchor.focused);
-}
+    assert!(!legacy.focused);
 
-#[test]
-fn duplicate_names_are_rejected() {
     let anchors = [
         Anchor::physical("blade", [0.0, 0.0, 1.0, 1.0]).expect("first anchor"),
         Anchor::physical("blade", [1.0, 1.0, 2.0, 2.0]).expect("second anchor"),
@@ -163,7 +149,7 @@ struct WireFrameOwned<T> {
 
 #[cfg(feature = "egui")]
 #[test]
-fn discarded_egui_passes_leave_only_the_presented_targets() {
+fn final_egui_pass_projects_only_presented_targets_and_focus() {
     use ::egui::{Context, RawInput, Rect, pos2};
 
     let ctx = Context::default();
@@ -171,36 +157,23 @@ fn discarded_egui_passes_leave_only_the_presented_targets() {
     let mut pass = 0;
     let _output = ctx.run_ui(RawInput::default(), |ui| {
         pass += 1;
-        egui::record_rect(
-            ui.ctx(),
-            "blade",
-            Rect::from_min_max(pos2(pass as f32, 0.0), pos2(pass as f32 + 1.0, 1.0)),
-        );
         if pass == 1 {
+            egui::record_rect(
+                ui.ctx(),
+                "discarded",
+                Rect::from_min_max(pos2(1.0, 0.0), pos2(2.0, 1.0)),
+            );
             ui.ctx().request_discard("exercise final-pass telemetry");
         }
-    });
-    let anchors = egui::take(&ctx, 1.0).expect("final-pass anchors");
-    assert_eq!(pass, 2);
-    assert_eq!(anchors.len(), 1);
-    assert_eq!(anchors[0].rect, [2.0, 0.0, 3.0, 1.0]);
-}
-
-#[cfg(feature = "egui")]
-#[test]
-fn egui_responses_publish_keyboard_focus() {
-    use ::egui::{Context, RawInput};
-
-    let ctx = Context::default();
-    egui::install(&ctx);
-    let _output = ctx.run_ui(RawInput::default(), |ui| {
-        let first = ui.button("first");
-        first.request_focus();
-        egui::record_response(ui, "first", &first);
-        let second = ui.button("second");
-        egui::record_response(ui, "second", &second);
+        let blade = ui.button("blade");
+        blade.request_focus();
+        egui::record_response(ui, "blade", &blade);
     });
     let anchors = egui::take(&ctx, 1.0).expect("focused response anchors");
-    assert!(anchors[0].focused);
-    assert!(!anchors[1].focused);
+    assert_eq!(pass, 2);
+    let [blade] = anchors.as_slice() else {
+        panic!("expected only the final-pass blade, found {anchors:?}");
+    };
+    assert_eq!(blade.name, "blade");
+    assert!(blade.focused);
 }

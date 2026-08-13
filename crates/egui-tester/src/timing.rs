@@ -214,22 +214,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn functional_deadline_does_not_adjudicate_latency() {
-        let budget = ReactionBudget::functional(Duration::from_secs(30));
+    fn liveness_timeout_neither_claims_nor_dilutes_production_latency() {
         let receipt = ActionReceipt::for_test(1_000_000, 1_000_000, 1_000_000);
-        let reaction = budget
-            .adjudicate("repaint", &receipt, 22_000_001, ())
+        let observed_ns = 22_000_001;
+        let reaction = ReactionBudget::functional(Duration::from_secs(30))
+            .adjudicate("repaint", &receipt, observed_ns, ())
             .expect("functional deadline must not claim a production regression");
         assert_eq!(reaction.elapsed(), Duration::from_nanos(21_000_001));
-    }
 
-    #[test]
-    fn functional_timeout_never_dilates_the_production_budget() {
         let budget =
             ReactionBudget::performance(Duration::from_millis(20)).timeout(Duration::from_secs(30));
-        let receipt = ActionReceipt::for_test(1_000_000, 1_000_000, 1_000_000);
         let error = budget
-            .adjudicate("repaint", &receipt, 22_000_001, ())
+            .adjudicate("repaint", &receipt, observed_ns, ())
             .expect_err("twenty-one milliseconds must breach twenty");
         assert!(matches!(error, Error::TooSlow { .. }));
     }

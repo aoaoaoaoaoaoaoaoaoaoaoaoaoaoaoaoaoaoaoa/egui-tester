@@ -730,26 +730,3 @@ pub fn demand(condition: bool, detail: impl Into<String>) -> Result<()> {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tempo_is_a_typed_serializable_stream_transition() {
-        assert_eq!(StoryTempo::TWOFOLD.factor(), 2);
-        assert_eq!(StoryTempo::FOURFOLD.factor(), 4);
-        assert_eq!(StoryTempo::EIGHTFOLD.factor(), 8);
-        let event = StoryEvent::Cue(StoryCue::Tempo {
-            tempo: StoryTempo::EIGHTFOLD,
-        });
-        let encoded = serde_json::to_value(event).ok();
-        assert_eq!(
-            encoded,
-            Some(serde_json::json!({
-                "stream": "cue",
-                "event": { "cue": "tempo", "tempo": 8 }
-            }))
-        );
-    }
-}

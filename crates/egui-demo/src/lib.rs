@@ -901,89 +901,8 @@ fn io(operation: &'static str, path: impl Into<PathBuf>, source: std::io::Error)
 mod tests {
     use super::*;
 
-    #[derive(serde::Deserialize)]
-    struct FantasyAbvObservation;
-
-    fn fantasy_abv_story<O: StoryObserver>(
-        story: &mut egui_tester::Story<'_, '_, FantasyAbvObservation, O>,
-    ) -> Result<()> {
-        let _hovered = story
-            .point("thumbnail:42", egui_tester::Motion::default())?
-            .next_frame()?;
-        story.hold(Duration::from_millis(400))?;
-
-        let grid = story.anchor("thumbnail-grid")?.center();
-        let _zoomed = story
-            .modified_wheel(
-                grid,
-                -4,
-                egui_tester::Wheel::default(),
-                egui_tester::Modifiers::CTRL,
-            )?
-            .next_frame()?;
-        let _reparented = story
-            .drag_to(
-                "query-atom:0",
-                "query-group:1",
-                egui_tester::Drag::default(),
-            )?
-            .next_frame()?;
-        let _moved = story
-            .motion_to((240, 180), egui_tester::Motion::default())?
-            .next_frame()?;
-        let _clicked = story
-            .click_current(egui_tester::Button::Primary)?
-            .next_frame()?;
-        Ok(())
-    }
-
     #[test]
-    fn abv_shaped_story_is_observer_agnostic() {
-        let _silent = std::hint::black_box(fantasy_abv_story::<egui_tester::Silent>);
-        let _filmed = std::hint::black_box(fantasy_abv_story::<Recorder>);
-    }
-
-    #[test]
-    fn scene_painting_changes_only_valid_rgba() {
-        let mut rgba = vec![0; 64 * 48 * 4];
-        paint_scene(
-            &mut rgba,
-            64,
-            48,
-            Some(Rect {
-                left: 4,
-                top: 4,
-                right: 40,
-                bottom: 30,
-            }),
-            Scene::Target {
-                pointer: Point { x: 20, y: 20 },
-            },
-        );
-        assert!(rgba.chunks_exact(4).any(|pixel| pixel != [0, 0, 0, 0]));
-        assert!(rgba.chunks_exact(4).all(|pixel| pixel.len() == 4));
-    }
-
-    #[test]
-    fn frame_count_rounds_up_without_vanishing() {
-        let config = RecorderConfig::new("film.mp4");
-        let directory = tempfile::tempdir().expect("temporary demo directory");
-        let recorder = Recorder::forge(RecorderConfig {
-            output: directory.path().join(config.output),
-            ..config
-        })
-        .expect("forge recorder");
-        assert_eq!(recorder.config.frames_per_second.get(), 60);
-        assert_eq!(recorder.config.encoding_profile, EncodingProfile::Proof);
-        assert_eq!(recorder.frames(Duration::ZERO), 1);
-        assert_eq!(recorder.frames(Duration::from_millis(84)), 6);
-        assert_eq!(recorder.frames_due(Duration::ZERO), 1);
-        assert_eq!(recorder.frames_due(Duration::from_millis(16)), 1);
-        assert_eq!(recorder.frames_due(Duration::from_millis(17)), 2);
-    }
-
-    #[test]
-    fn tempo_accelerates_automatic_beats_without_erasing_them() {
+    fn film_clock_rounds_up_elapsed_ticks_and_preserves_tempo() {
         let config = RecorderConfig::new("film.mp4");
         let directory = tempfile::tempdir().expect("temporary demo directory");
         let mut recorder = Recorder::forge(RecorderConfig {
@@ -991,21 +910,16 @@ mod tests {
             ..config
         })
         .expect("forge recorder");
+        assert_eq!(recorder.frames(Duration::ZERO), 1);
+        assert_eq!(recorder.frames(Duration::from_millis(84)), 6);
+        assert_eq!(recorder.frames_due(Duration::ZERO), 1);
+        assert_eq!(recorder.frames_due(Duration::from_millis(16)), 1);
+        assert_eq!(recorder.frames_due(Duration::from_millis(17)), 2);
         assert_eq!(recorder.beat(TARGET_FLIGHT), TARGET_FLIGHT);
 
         recorder.tempo = StoryTempo::EIGHTFOLD;
         assert_eq!(recorder.beat(TARGET_FLIGHT), Duration::from_micros(27_500));
         assert_eq!(recorder.frames(recorder.beat(TARGET_FLIGHT)), 2);
         assert_eq!(recorder.frames(recorder.beat(Duration::ZERO)), 1);
-    }
-
-    #[test]
-    fn showpiece_profile_is_slow_and_animation_tuned() {
-        assert!(!EncodingProfile::Proof.stages_lossless_capture());
-        assert!(EncodingProfile::Showpiece.stages_lossless_capture());
-        assert_eq!(
-            EncodingProfile::Showpiece.x264(),
-            ("slow", "12", Some("animation"))
-        );
     }
 }

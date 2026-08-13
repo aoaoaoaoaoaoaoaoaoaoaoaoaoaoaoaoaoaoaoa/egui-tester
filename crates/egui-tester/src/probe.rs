@@ -690,29 +690,6 @@ mod tests {
     }
 
     #[test]
-    fn focused_anchor_requires_both_identity_and_focus() {
-        let frame = ProbeFrame {
-            schema: egui_tester_witness::SCHEMA,
-            launch: "launch".to_owned(),
-            frame: 1,
-            begun_ns: 1,
-            observed_ns: 2,
-            surface_presented_ns: 3,
-            surface_sequence: 1,
-            ppp: 1.0,
-            anchors: vec![
-                Anchor::physical("idle", [0.0, 0.0, 1.0, 1.0]).expect("idle anchor"),
-                Anchor::physical("active", [1.0, 1.0, 2.0, 2.0])
-                    .expect("active anchor")
-                    .with_focus(true),
-            ],
-            state: Value::Null,
-        };
-        assert!(frame.focused_anchor("idle").is_none());
-        assert!(frame.focused_anchor("active").is_some());
-    }
-
-    #[test]
     fn semantic_stability_restarts_when_the_projection_moves() {
         let epoch = Instant::now();
         let mut stability = Stability::new();

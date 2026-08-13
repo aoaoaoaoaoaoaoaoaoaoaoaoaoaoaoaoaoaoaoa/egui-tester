@@ -1049,6 +1049,8 @@ mod tests {
 
     #[test]
     fn graphics_allowlist_admits_arbitrary_nvidia_slots_only() {
+        // A prefix check would expose executables such as `nvidia-smi` while
+        // rejecting valid multi-digit device slots on machines unlike ours.
         for admitted in [
             "nvidia0",
             "nvidia27",
