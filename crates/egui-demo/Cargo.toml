@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-egui-tester = { path = "../egui-tester", version = "0.7.1" }
+egui-tester = { path = "../egui-tester", version = "0.8.0" }
 font8x8.workspace = true
 serde.workspace = true
 serde_json.workspace = true
