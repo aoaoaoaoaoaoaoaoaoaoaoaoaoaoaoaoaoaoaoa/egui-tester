@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "egui-demo"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "egui-tester",
  "font8x8",
@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "egui-tester"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "bitflags 2.13.1",
  "egui-tester-witness",
@@ -830,14 +830,14 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-doctor"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "egui-tester",
 ]
 
 [[package]]
 name = "egui-tester-fixture"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "eframe",
  "egui-tester",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "egui-tester-witness"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "egui",
  "rustix 1.1.4",
@@ -4038,11 +4038,3 @@ dependencies = [
  "syn 3.0.3",
  "winnow",
 ]
-
-[[patch.unused]]
-name = "brass_poolrooms"
-version = "0.12.0"
-
-[[patch.unused]]
-name = "eternalist-apps"
-version = "0.6.0"
