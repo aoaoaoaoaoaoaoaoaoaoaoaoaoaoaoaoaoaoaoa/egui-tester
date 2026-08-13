@@ -174,9 +174,11 @@ multiplier” is inadmissible.
 ## Platform Frontier
 
 X11 is the sole complete backend. Headless Weston proves only isolated launch
-and output capture. Native Wayland input requires compositor authority, likely
-a test protocol or plugin; AccessKit actions would bypass the pointer and
-keyboard boundary. That expansion remains parked.
+and output capture. The Wayland testbed does not grant client authority when a
+socket pathname merely appears; it first proves that the configured output is
+capturable. Native Wayland input requires compositor authority, likely a test
+protocol or plugin; AccessKit actions would bypass the pointer and keyboard
+boundary. That expansion remains parked.
 
 AccessKit is instead the likely replacement for hand-authored target rectangles
 where its stable author IDs, roles, names, values, focus, and bounds suffice.

@@ -60,6 +60,12 @@ pub enum Error {
         detail: String,
     },
 
+    #[error("Wayland protocol failure while {operation}: {detail}")]
+    Wayland {
+        operation: &'static str,
+        detail: String,
+    },
+
     #[error("invalid probe `{path}`: {detail}")]
     Probe { path: PathBuf, detail: String },
 

@@ -719,11 +719,13 @@ impl Weston {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             if socket.exists() {
-                return Ok(Self {
+                let mut weston = Self {
                     child,
                     socket_name,
                     runtime: weston_runtime,
-                });
+                };
+                weston.wait_until_capturable(root, &geometry, Duration::from_secs(5))?;
+                return Ok(weston);
             }
             if let Some(status) = child
                 .try_wait()
@@ -758,6 +760,40 @@ impl Weston {
                 OsString::from("wayland"),
             ),
         ]);
+    }
+
+    fn wait_until_capturable(
+        &mut self,
+        root: &Path,
+        geometry: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut last_fault = "output capture has not completed".to_owned();
+        while Instant::now() < deadline {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .map_err(|err| io("poll Weston", "weston", err))?
+            {
+                return Err(Error::Containment {
+                    layer: "Weston",
+                    detail: format!("headless compositor exited with {status}"),
+                });
+            }
+            match self.capture(root) {
+                Ok(frame) if frame.width() != 0 && frame.height() != 0 => return Ok(()),
+                Ok(_) => "capture produced a zero-area output".clone_into(&mut last_fault),
+                Err(error) => last_fault = error.to_string(),
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        Err(Error::Containment {
+            layer: "Weston",
+            detail: format!(
+                "{geometry} headless output did not become capturable within {timeout:?}: {last_fault}"
+            ),
+        })
     }
 
     fn capture(&self, root: &Path) -> Result<crate::Frame> {
@@ -795,7 +831,7 @@ impl Weston {
             .filter(|path| path.extension().is_some_and(|extension| extension == "png"))
             .collect::<Vec<_>>();
         let [capture] = captures.as_slice() else {
-            return Err(Error::X11 {
+            return Err(Error::Wayland {
                 operation: "capture Wayland output",
                 detail: format!(
                     "expected one PNG from one virtual output, found {}",
