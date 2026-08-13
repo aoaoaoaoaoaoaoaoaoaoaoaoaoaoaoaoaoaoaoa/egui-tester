@@ -129,6 +129,15 @@ fn drives_real_input_and_observes_pixels() {
             },
         )
         .expect("observe pointer drag");
+    let _departure = session.leave().expect("move pointer outside fixture");
+    let _pointer_outside = probe
+        .wait(
+            &app,
+            Duration::from_secs(3),
+            "pointer to leave the client window",
+            |frame| frame.state["pointer_inside"] == false,
+        )
+        .expect("observe pointer departure");
     let _closed = session.close().expect("request native window close");
     let exit = app
         .wait(Duration::from_secs(3))

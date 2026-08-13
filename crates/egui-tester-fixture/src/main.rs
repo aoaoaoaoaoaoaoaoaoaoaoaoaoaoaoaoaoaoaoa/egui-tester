@@ -144,6 +144,7 @@ impl eframe::App for Fixture {
                     text: &self.text,
                     text_focused,
                     drag_value: self.drag_value,
+                    pointer_inside: ui.ctx().pointer_hover_pos().is_some(),
                 },
             };
             if let Ok(bytes) = serde_json::to_vec(&probe) {
@@ -174,6 +175,7 @@ struct State<'a> {
     text: &'a str,
     text_focused: bool,
     drag_value: f32,
+    pointer_inside: bool,
 }
 
 fn anchor(name: &'static str, rect: egui::Rect) -> Anchor {

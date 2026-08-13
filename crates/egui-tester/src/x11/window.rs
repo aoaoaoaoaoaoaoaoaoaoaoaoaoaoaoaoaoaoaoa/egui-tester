@@ -1,4 +1,5 @@
 use x11rb::{
+    connection::Connection as _,
     errors::ReplyError,
     protocol::{
         ErrorKind,
@@ -8,6 +9,42 @@ use x11rb::{
 };
 
 use crate::{Error, Result};
+
+pub(super) fn exterior_point(
+    connection: &RustConnection,
+    screen: usize,
+    window: Window,
+    (left, top): (i16, i16),
+) -> Result<(i16, i16)> {
+    let geometry = connection
+        .get_geometry(window)
+        .map_err(|error| fault("query window geometry", error))?
+        .reply()
+        .map_err(|error| fault("query window geometry", error))?;
+    let screen = &connection.setup().roots[screen];
+    let screen_right = i16::try_from(screen.width_in_pixels.saturating_sub(1))
+        .map_or(i16::MAX, |coordinate| coordinate);
+    let screen_bottom = i16::try_from(screen.height_in_pixels.saturating_sub(1))
+        .map_or(i16::MAX, |coordinate| coordinate);
+    let right = i32::from(left) + i32::from(geometry.width);
+    let bottom = i32::from(top) + i32::from(geometry.height);
+    let outside = |(x, y): (i16, i16)| {
+        let (x, y) = (i32::from(x), i32::from(y));
+        x < i32::from(left) || x >= right || y < i32::from(top) || y >= bottom
+    };
+    [
+        (0, 0),
+        (screen_right, 0),
+        (0, screen_bottom),
+        (screen_right, screen_bottom),
+    ]
+    .into_iter()
+    .find(|point| outside(*point))
+    .ok_or_else(|| Error::X11 {
+        operation: "move pointer outside window",
+        detail: "client window covers every addressable screen corner".to_owned(),
+    })
+}
 
 pub(super) fn title(
     connection: &RustConnection,

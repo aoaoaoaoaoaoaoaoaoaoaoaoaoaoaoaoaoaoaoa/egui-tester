@@ -11,8 +11,9 @@ not verdicts.
 X11 is the complete, release-tested vertical:
 
 - authenticated private Xvfb, never the caller's `DISPLAY`;
-- XTEST clicks, held-button drags, strokes, wheels, modifiers, named navigation
-  keys including Space, function keys, and Latin-1 keyboard input;
+- XTEST clicks, held-button drags, strokes, wheels, pointer departure,
+  modifiers, named navigation keys including Space, function keys, and Latin-1
+  keyboard input;
 - exact window discovery, focus, RGBA capture, tolerant regional pixel
   comparison, embedded-window eviction and redock, and PNG artifacts;
 - a private XDG tree, mount and network namespaces, a transient user-service

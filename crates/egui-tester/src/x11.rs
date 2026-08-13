@@ -248,6 +248,14 @@ impl X11Controller {
         self.flush("move pointer")
     }
 
+    /// Move the pointer to a screen coordinate outside the client window.
+    pub fn leave(&self, window: &Window) -> Result<()> {
+        let origin = self.window_origin(window)?;
+        let point = window::exterior_point(&self.connection, self.screen, window.id, origin)?;
+        self.fake(MOTION_NOTIFY_EVENT, 0, point.0, point.1)?;
+        self.flush("move pointer outside window")
+    }
+
     pub fn pointer(&self, window: &Window) -> Result<(i16, i16)> {
         let reply = self
             .connection
@@ -858,6 +866,16 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         self.app.ensure_running("pointer motion")?;
         let receipt = ActionReceipt::begin(format!("pointer motion to ({x}, {y})"));
         self.controller.move_to(&self.window, x, y)?;
+        let receipt = receipt.finish();
+        self.record(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// Move the pointer outside the bound client window.
+    pub fn leave(&self) -> Result<ActionReceipt> {
+        self.app.ensure_running("pointer departure")?;
+        let receipt = ActionReceipt::begin("pointer departure from window");
+        self.controller.leave(&self.window)?;
         let receipt = receipt.finish();
         self.record(&receipt)?;
         Ok(receipt)
