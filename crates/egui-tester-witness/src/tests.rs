@@ -155,7 +155,7 @@ fn final_egui_pass_projects_only_presented_targets_and_focus() {
     let ctx = Context::default();
     egui::install(&ctx);
     let mut pass = 0;
-    let _output = ctx.run_ui(RawInput::default(), |ui| {
+    ctx.run_ui(RawInput::default(), |ui| {
         pass += 1;
         if pass == 1 {
             egui::record_rect(
@@ -168,7 +168,8 @@ fn final_egui_pass_projects_only_presented_targets_and_focus() {
         let blade = ui.button("blade");
         blade.request_focus();
         egui::record_response(ui, "blade", &blade);
-    });
+    })
+    .drop_without_applying_deltas();
     let anchors = egui::take(&ctx, 1.0).expect("focused response anchors");
     assert_eq!(pass, 2);
     let [blade] = anchors.as_slice() else {
