@@ -1,14 +1,108 @@
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+
 use x11rb::{
+    CURRENT_TIME,
     connection::Connection as _,
     errors::ReplyError,
     protocol::{
         ErrorKind,
-        xproto::{Atom, AtomEnum, ConnectionExt as _, MapState, Window},
+        xproto::{
+            Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, EventMask,
+            InputFocus, MapState, StackMode, Window,
+        },
     },
     rust_connection::RustConnection,
 };
 
 use crate::{Error, Result};
+
+const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub(super) fn activate(
+    connection: &RustConnection,
+    root: Window,
+    window: Window,
+    title: &str,
+    active: Atom,
+    supported: Atom,
+) -> Result<bool> {
+    let features = connection
+        .get_property(false, root, supported, AtomEnum::ATOM, 0, u32::MAX)
+        .map_err(|error| fault("read EWMH support", error))?
+        .reply()
+        .map_err(|error| fault("read EWMH support", error))?;
+    if !features
+        .value32()
+        .is_some_and(|mut atoms| atoms.any(|atom| atom == active))
+    {
+        return Ok(false);
+    }
+    let current = active_window(connection, root, active)?.unwrap_or_default();
+    let event = ClientMessageEvent::new(32, window, active, [2, CURRENT_TIME, current, 0, 0]);
+    connection
+        .send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )
+        .map_err(|error| fault("request window activation", error))?
+        .check()
+        .map_err(|error| fault("request window activation", error))?;
+    connection
+        .flush()
+        .map_err(|error| fault("request window activation", error))?;
+    let deadline = Instant::now() + ACTIVATION_TIMEOUT;
+    loop {
+        if active_window(connection, root, active)? == Some(window) {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::X11 {
+                operation: "activate window",
+                detail: format!(
+                    "EWMH window manager did not activate `{title}` within {ACTIVATION_TIMEOUT:?}"
+                ),
+            });
+        }
+        thread::sleep(Duration::from_millis(8));
+    }
+}
+
+fn active_window(
+    connection: &RustConnection,
+    root: Window,
+    active: Atom,
+) -> Result<Option<Window>> {
+    let reply = connection
+        .get_property(false, root, active, AtomEnum::WINDOW, 0, 1)
+        .map_err(|error| fault("read active window", error))?
+        .reply()
+        .map_err(|error| fault("read active window", error))?;
+    Ok(reply.value32().and_then(|mut windows| windows.next()))
+}
+
+pub(super) fn focus_unmanaged(connection: &RustConnection, window: Window) -> Result<()> {
+    connection
+        .configure_window(
+            window,
+            &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+        )
+        .map_err(|error| fault("raise window", error))?
+        .check()
+        .map_err(|error| fault("raise window", error))?;
+    connection
+        .set_input_focus(InputFocus::PARENT, window, CURRENT_TIME)
+        .map_err(|error| fault("focus window", error))?
+        .check()
+        .map_err(|error| fault("focus window", error))?;
+    connection
+        .flush()
+        .map_err(|error| fault("focus window", error))
+}
 
 pub(super) fn exterior_candidates(
     connection: &RustConnection,

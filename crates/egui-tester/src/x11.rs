@@ -16,9 +16,8 @@ use x11rb::{
     image::Image,
     protocol::{
         xproto::{
-            Atom, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent, ConfigureWindowAux,
-            ConnectionExt as _, EventMask, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
-            MOTION_NOTIFY_EVENT, Window as WindowId,
+            Atom, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ClientMessageEvent, ConnectionExt as _,
+            EventMask, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, Window as WindowId,
         },
         xtest::ConnectionExt as _,
     },
@@ -202,21 +201,21 @@ impl X11Controller {
         Ok(matches)
     }
 
+    /// Activate a managed window through EWMH, or focus it directly without a window manager.
     pub fn focus(&self, window: &Window) -> Result<()> {
-        self.connection
-            .configure_window(
-                window.id,
-                &ConfigureWindowAux::new().stack_mode(x11rb::protocol::xproto::StackMode::ABOVE),
-            )
-            .map_err(|err| x11("raise window", err))?
-            .check()
-            .map_err(|err| x11("raise window", err))?;
-        self.connection
-            .set_input_focus(InputFocus::PARENT, window.id, CURRENT_TIME)
-            .map_err(|err| x11("focus window", err))?
-            .check()
-            .map_err(|err| x11("focus window", err))?;
-        self.flush("focus window")
+        let active = self.atom("_NET_ACTIVE_WINDOW")?;
+        let supported = self.atom("_NET_SUPPORTED")?;
+        if window::activate(
+            &self.connection,
+            self.root(),
+            window.id,
+            &window.title,
+            active,
+            supported,
+        )? {
+            return Ok(());
+        }
+        window::focus_unmanaged(&self.connection, window.id)
     }
 
     /// Deliver the ICCCM window-manager close protocol to one client window.
@@ -849,6 +848,7 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         self.app
     }
 
+    /// Make the bound client the visible native input destination.
     pub fn focus(&self) -> Result<()> {
         self.app.ensure_running("window focus")?;
         self.controller.focus(&self.window)?;
