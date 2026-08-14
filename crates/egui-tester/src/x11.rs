@@ -206,10 +206,7 @@ impl X11Controller {
         self.connection
             .configure_window(
                 window.id,
-                &ConfigureWindowAux::new()
-                    .x(0)
-                    .y(0)
-                    .stack_mode(x11rb::protocol::xproto::StackMode::ABOVE),
+                &ConfigureWindowAux::new().stack_mode(x11rb::protocol::xproto::StackMode::ABOVE),
             )
             .map_err(|err| x11("raise window", err))?
             .check()
@@ -251,9 +248,19 @@ impl X11Controller {
     /// Move the pointer to a screen coordinate outside the client window.
     pub fn leave(&self, window: &Window) -> Result<()> {
         let origin = self.window_origin(window)?;
-        let point = window::exterior_point(&self.connection, self.screen, window.id, origin)?;
-        self.fake(MOTION_NOTIFY_EVENT, 0, point.0, point.1)?;
-        self.flush("move pointer outside window")
+        for point in window::exterior_candidates(&self.connection, self.screen, window.id, origin)?
+        {
+            self.fake(MOTION_NOTIFY_EVENT, 0, point.0, point.1)?;
+            self.flush("move pointer outside window")?;
+            if window::pointer_is_outside(&self.connection, window.id)? {
+                return Ok(());
+            }
+        }
+        Err(Error::X11 {
+            operation: "move pointer outside window",
+            detail: "X server kept the pointer inside the client at every exterior screen corner"
+                .to_owned(),
+        })
     }
 
     pub fn pointer(&self, window: &Window) -> Result<(i16, i16)> {

@@ -10,12 +10,12 @@ use x11rb::{
 
 use crate::{Error, Result};
 
-pub(super) fn exterior_point(
+pub(super) fn exterior_candidates(
     connection: &RustConnection,
     screen: usize,
     window: Window,
     (left, top): (i16, i16),
-) -> Result<(i16, i16)> {
+) -> Result<Vec<(i16, i16)>> {
     let geometry = connection
         .get_geometry(window)
         .map_err(|error| fault("query window geometry", error))?
@@ -32,18 +32,46 @@ pub(super) fn exterior_point(
         let (x, y) = (i32::from(x), i32::from(y));
         x < i32::from(left) || x >= right || y < i32::from(top) || y >= bottom
     };
-    [
+    let mut candidates = [
         (0, 0),
         (screen_right, 0),
         (0, screen_bottom),
         (screen_right, screen_bottom),
     ]
     .into_iter()
-    .find(|point| outside(*point))
-    .ok_or_else(|| Error::X11 {
-        operation: "move pointer outside window",
-        detail: "client window covers every addressable screen corner".to_owned(),
-    })
+    .filter(|point| outside(*point))
+    .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(Error::X11 {
+            operation: "move pointer outside window",
+            detail: "client window covers every addressable screen corner".to_owned(),
+        });
+    }
+    let center_x = i64::from(left) + i64::from(geometry.width) / 2;
+    let center_y = i64::from(top) + i64::from(geometry.height) / 2;
+    candidates.sort_unstable_by_key(|&(x, y)| {
+        let dx = i64::from(x) - center_x;
+        let dy = i64::from(y) - center_y;
+        std::cmp::Reverse(dx * dx + dy * dy)
+    });
+    Ok(candidates)
+}
+
+pub(super) fn pointer_is_outside(connection: &RustConnection, window: Window) -> Result<bool> {
+    let geometry = connection
+        .get_geometry(window)
+        .map_err(|error| fault("query window geometry", error))?
+        .reply()
+        .map_err(|error| fault("query window geometry", error))?;
+    let pointer = connection
+        .query_pointer(window)
+        .map_err(|error| fault("query pointer", error))?
+        .reply()
+        .map_err(|error| fault("query pointer", error))?;
+    Ok(pointer.win_x < 0
+        || pointer.win_y < 0
+        || i32::from(pointer.win_x) >= i32::from(geometry.width)
+        || i32::from(pointer.win_y) >= i32::from(geometry.height))
 }
 
 pub(super) fn title(
