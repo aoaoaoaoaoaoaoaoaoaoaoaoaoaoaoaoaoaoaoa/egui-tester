@@ -30,4 +30,4 @@ pub use story::{
 };
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
 pub use timing::{ActionReceipt, ReactionBudget, ReactionEndpoint, Timed};
-pub use x11::{Window, WindowQuery, X11Controller, X11Session};
+pub use x11::{Window, WindowQuery, X11Controller, X11CursorImage, X11Session};

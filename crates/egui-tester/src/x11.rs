@@ -30,9 +30,14 @@ use crate::{
     Probe, Result, Stroke, Testbed, Wheel,
 };
 
+mod controller;
+mod cursor;
 mod embedded;
 mod pixels;
 mod window;
+
+pub use controller::X11Controller;
+pub use cursor::X11CursorImage;
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
 const MODIFIER_GUARD: Duration = Duration::from_millis(32);
@@ -102,21 +107,6 @@ impl Window {
     }
 }
 
-/// Authenticated control connection to the testbed's private X server.
-pub struct X11Controller {
-    connection: RustConnection,
-    screen: usize,
-}
-
-impl std::fmt::Debug for X11Controller {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("X11Controller")
-            .field("screen", &self.screen)
-            .finish_non_exhaustive()
-    }
-}
-
 impl X11Controller {
     pub(crate) fn connect(display: u16, cookie: &[u8]) -> Result<Self> {
         let socket = Path::new("/tmp/.X11-unix").join(format!("X{display}"));
@@ -131,6 +121,7 @@ impl X11Controller {
             .map_err(|err| x11("query XTEST", err))?
             .reply()
             .map_err(|err| x11("query XTEST", err))?;
+        cursor::prime(&controller.connection)?;
         Ok(controller)
     }
 
@@ -846,6 +837,11 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
     #[must_use]
     pub const fn application(&self) -> &Application<'bed> {
         self.app
+    }
+
+    /// Read the pointer image from the session's sealed X11 display.
+    pub fn cursor_image(&self) -> Result<X11CursorImage> {
+        self.controller.cursor_image()
     }
 
     /// Make the bound client the visible native input destination.
