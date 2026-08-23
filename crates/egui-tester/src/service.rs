@@ -243,6 +243,7 @@ impl<'a> Application<'a> {
                 "--user",
                 "--remain-after-exit",
                 "--service-type=exec",
+                "--description=isolated egui application",
                 "--unit",
                 &unit,
                 "--property=KillMode=control-group",

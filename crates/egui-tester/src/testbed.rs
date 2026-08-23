@@ -548,6 +548,7 @@ pub(crate) struct Xvfb {
     child: Child,
     display: u16,
     cookie: Vec<u8>,
+    lock: PathBuf,
     socket: PathBuf,
 }
 
@@ -617,6 +618,7 @@ impl Xvfb {
                     child,
                     display,
                     cookie,
+                    lock: PathBuf::from(format!("/tmp/.X{display}-lock")),
                     socket,
                 });
             }
@@ -660,6 +662,8 @@ impl Drop for Xvfb {
     fn drop(&mut self) {
         let _ignored = self.child.kill();
         let _ignored = self.child.wait();
+        let _ignored = fs::remove_file(&self.socket);
+        let _ignored = fs::remove_file(&self.lock);
     }
 }
 
