@@ -18,6 +18,7 @@ mod timing;
 mod x11;
 
 pub use condition::{Condition, Field, field};
+pub use egui_tester_witness::TargetName;
 pub use error::{Error, Result};
 pub use frames::{CadenceBudget, CadenceReport, FrameProbe, FrameSample, FrameTrace};
 pub use input::{Button, Drag, Key, Modifiers, Motion, Stroke, Wheel};

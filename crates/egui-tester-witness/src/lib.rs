@@ -44,6 +44,8 @@ pub enum Error {
     Environment(&'static str),
     #[error("invalid witness anchor `{name}`: {detail}")]
     Anchor { name: String, detail: &'static str },
+    #[error("invalid Target name `{name}`: {detail}")]
+    TargetName { name: String, detail: &'static str },
     #[error("serialize witness frame: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("{operation} witness `{path}`: {source}")]
@@ -62,6 +64,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+mod target;
+pub use target::TargetName;
 
 /// Named hit-test rectangle in physical, window-relative pixels.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

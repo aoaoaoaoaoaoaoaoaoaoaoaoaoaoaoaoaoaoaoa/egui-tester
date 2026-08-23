@@ -6,6 +6,9 @@ real pixels, and judges external product effects. Optional one-way observations
 locate controls and release waits; they cannot mutate the application and are
 not verdicts.
 
+The [Architecture Names](docs/architecture.md#names) section owns the stable
+acceptance vocabulary and Target wire grammar.
+
 ## Present Surface
 
 X11 is the complete, release-tested vertical:

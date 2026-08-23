@@ -10,10 +10,39 @@ boundary, and teardown.
 **Witness** is one-way product telemetry used for targeting and
 synchronization.
 
+**Target** is a stable semantic address published by a product. Its wire name
+uses `owner.semantic.path[/identity...]`: dotted kebab-case segments express
+stable semantics, and slash-delimited encoded components carry runtime
+identity. Semantic segments admit neither underscores nor colons. After the
+first slash, only unreserved ASCII and canonical percent escapes are admitted;
+raw user text is encoded.
+
+**Anchor** is one Target's observed physical rectangle and keyboard-focus fact
+in a presented frame. A Target may be absent; an Anchor is frame evidence.
+
+**Observation** is the deliberately bounded product-state projection published
+with one presented witness frame.
+
+**Probe** is the sealed journal reader that advances through complete witness
+records and retains the newest Observation locally.
+
+**Condition** is a pure predicate over an Observation with one diagnostic
+description.
+
+**Reaction** is the causally ordered interval beginning with an injected action
+receipt and ending at an eligible Condition, surface present, pixels, or
+external effect. Eligibility does not itself prove causation.
+
 **Oracle** is external product evidence used for a verdict.
+
+**Verdict** is the final judgment obtained from pixels, private durable state,
+process state, or another external Oracle. Witness state alone is not a Verdict.
 
 **Story** is the effectful, typed program that drives one application and emits
 a causal stream of authored cues and immutable execution facts.
+
+**Fixture** is deterministic input and environment owned by the acceptance
+executable. It is not a product backdoor or substitute implementation.
 
 **Borrow** is a live host path deliberately exposed read-only. It never means a
 writable mount, overlay, or redirection.
