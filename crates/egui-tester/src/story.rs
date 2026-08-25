@@ -98,7 +98,7 @@ pub enum StoryEvent<'a> {
     Fact(StoryFact<'a>),
 }
 
-trait CaptureSurface {
+pub(crate) trait CaptureSurface {
     fn capture(&self) -> Result<Frame>;
 }
 
@@ -115,6 +115,10 @@ pub struct StorySurface<'a> {
 }
 
 impl StorySurface<'_> {
+    pub(crate) const fn new(surface: &dyn CaptureSurface) -> StorySurface<'_> {
+        StorySurface { surface }
+    }
+
     pub fn capture(self) -> Result<Frame> {
         self.surface.capture()
     }
@@ -132,6 +136,20 @@ pub trait StoryObserver {
     fn permits_performance_verdicts(&self) -> bool {
         false
     }
+}
+
+/// Platform-neutral editorial surface of an executing product story.
+///
+/// Product-owned choreography traits extend this vocabulary with semantic
+/// acts. Each platform projection then supplies its own target resolution,
+/// native input, synchronization, and verdict machinery while observers
+/// consume the resulting causal stream unchanged.
+pub trait Choreography {
+    fn chapter(&mut self, title: &str) -> Result<()>;
+
+    fn hold(&mut self, duration: Duration) -> Result<()>;
+
+    fn tempo(&mut self, tempo: StoryTempo) -> Result<()>;
 }
 
 /// Inert default observer used by ordinary acceptance stories.
@@ -667,6 +685,20 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
                 surface: &self.session,
             },
         )
+    }
+}
+
+impl<S: DeserializeOwned + 'static, O: StoryObserver> Choreography for Story<'_, '_, S, O> {
+    fn chapter(&mut self, title: &str) -> Result<()> {
+        Self::chapter(self, title)
+    }
+
+    fn hold(&mut self, duration: Duration) -> Result<()> {
+        Self::hold(self, duration)
+    }
+
+    fn tempo(&mut self, tempo: StoryTempo) -> Result<()> {
+        Self::tempo(self, tempo)
     }
 }
 

@@ -5,6 +5,7 @@
 //! presented focus, and synchronize frames, but they are deliberately
 //! incapable of mutating the application.
 
+mod android;
 mod condition;
 mod error;
 mod frames;
@@ -17,6 +18,7 @@ mod testbed;
 mod timing;
 mod x11;
 
+pub use android::{AndroidChoreography, AndroidDevice, AndroidPerfetto, AndroidPinch};
 pub use condition::{Condition, Field, field};
 pub use egui_tester_witness::TargetName;
 pub use error::{Error, Result};
@@ -26,8 +28,8 @@ pub use pixels::{Frame, PixelRegion};
 pub use probe::{Anchor, LegacyJsonProbe, LegacyProbe, LegacyProbeFrame, Probe, ProbeFrame};
 pub use service::{AppCommand, Application, Graphics, Network};
 pub use story::{
-    Reaction, Silent, Story, StoryCue, StoryEvent, StoryFact, StoryObserver, StorySurface,
-    StoryTempo, demand,
+    Choreography, Reaction, Silent, Story, StoryCue, StoryEvent, StoryFact, StoryObserver,
+    StorySurface, StoryTempo, demand,
 };
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
 pub use timing::{ActionReceipt, ReactionBudget, ReactionEndpoint, Timed};

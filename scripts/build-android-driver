@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
+if [ -z "$sdk" ]; then
+    printf '%s\n' 'ANDROID_HOME or ANDROID_SDK_ROOT is required' >&2
+    exit 2
+fi
+
+platform=${ANDROID_PLATFORM:-android-35}
+android_jar="$sdk/platforms/$platform/android.jar"
+if [ ! -f "$android_jar" ]; then
+    printf 'Android platform is unavailable: %s\n' "$android_jar" >&2
+    exit 2
+fi
+
+if [ -n "${ANDROID_BUILD_TOOLS:-}" ]; then
+    tools="$sdk/build-tools/$ANDROID_BUILD_TOOLS"
+else
+    tools=$(find "$sdk/build-tools" -mindepth 1 -maxdepth 1 -type d -print \
+        | sort -V | tail -n 1)
+fi
+for tool in aapt2 apksigner d8; do
+    if [ ! -x "$tools/$tool" ]; then
+        printf 'Android build tool is unavailable: %s\n' "$tools/$tool" >&2
+        exit 2
+    fi
+done
+
+output=${1:-/data/main/cargo-target/egui-tester-android/driver.apk}
+keystore=${ANDROID_TEST_KEYSTORE:-$HOME/.local/share/android/debug.keystore}
+password=${ANDROID_TEST_KEYSTORE_PASSWORD:-android}
+work=$(mktemp -d /tmp/egui-tester-android-driver.XXXXXX)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/classes" "$work/dex" "$(dirname -- "$output")"
+
+javac --release 8 -Xlint:-options -classpath "$android_jar" -d "$work/classes" \
+    "$root/android/driver/src/moe/swarm/eguitester/driver/Driver.java"
+"$tools/d8" --lib "$android_jar" --min-api 28 --output "$work/dex" \
+    "$work/classes/moe/swarm/eguitester/driver/Driver.class"
+"$tools/aapt2" link --manifest "$root/android/driver/AndroidManifest.xml" \
+    -I "$android_jar" --min-sdk-version 28 --target-sdk-version 35 \
+    -o "$work/driver-unsigned.apk"
+(cd "$work/dex" && jar uf "$work/driver-unsigned.apk" classes.dex)
+"$tools/apksigner" sign --ks "$keystore" --ks-pass "pass:$password" \
+    --out "$output" "$work/driver-unsigned.apk"
+"$tools/apksigner" verify "$output"
+printf '%s\n' "$output"

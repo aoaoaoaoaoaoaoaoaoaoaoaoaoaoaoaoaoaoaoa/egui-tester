@@ -38,8 +38,18 @@ external effect. Eligibility does not itself prove causation.
 **Verdict** is the final judgment obtained from pixels, private durable state,
 process state, or another external Oracle. Witness state alone is not a Verdict.
 
-**Story** is the effectful, typed program that drives one application and emits
-a causal stream of authored cues and immutable execution facts.
+**Choreography** is a product-owned semantic score. Its base law carries
+editorial cues; a product trait extends that law with domain acts without
+encoding platform targets or HID.
+
+**Projection** binds Choreography to one platform's target resolution, native
+input, synchronization, and verdict machinery.
+
+**Observer** is a passive consumer of one execution's causal event stream. It
+may retain evidence but has no product-mutation authority.
+
+**Story** is one effectful execution of Choreography through a Projection and
+Observer.
 
 **Fixture** is deterministic input and environment owned by the acceptance
 executable. It is not a product backdoor or substitute implementation.
@@ -157,13 +167,14 @@ replacement pass that was actually submitted.
 
 ## Story Stream
 
-`Story` is deliberately not an eager action vector. It executes native input
-and semantic waits while emitting `StoryEvent` items synchronously in causal
-order. `StoryCue` carries authored editorial intent: chapters, literal holds,
-and persistent choreography tempo. `StoryFact` carries resolved target
-geometry, dispatched input receipts, and matched observation identity. A
-consumer sees only a capture-capable view of the product surface and gains no
-mutation authority.
+Choreography is deliberately not an eager action vector or persisted replay.
+The product score calls semantic acts through a product-owned trait. A
+Projection executes native input and synchronization while emitting
+`StoryEvent` items synchronously in causal order. `StoryCue` carries authored
+editorial intent: chapters, literal holds, and persistent choreography tempo.
+`StoryFact` carries resolved target geometry, dispatched input receipts, and
+matched observation identity. An Observer sees only a capture-capable view of
+the product surface and gains no mutation authority.
 
 Ordinary acceptance attaches `Silent`; film production attaches
 `egui_demo::Recorder`. Both run the same scenario, so a recorded take remains
@@ -204,7 +215,15 @@ multiplier” is inadmissible.
 
 ## Platform Frontier
 
-X11 is the sole complete backend. Headless Weston proves only isolated launch
+X11 is the sole complete backend. Android supplies an ADB Projection for
+physical-device choreography: shell touch and key input, UiAutomation
+multi-pointer gestures, screenshots, and an optional Perfetto Observer. It
+does not yet provide a sealed semantic witness, predicate-driven
+synchronization, private containment, or acceptance-parity verdicts. Its JSONL
+event trace preserves causal host order; its host clock is not directly
+comparable with the device Perfetto clock.
+
+Headless Weston proves only isolated launch
 and output capture. The Wayland testbed does not grant client authority when a
 socket pathname merely appears; it first proves that the configured output is
 capturable. Native Wayland input requires compositor authority, likely a test

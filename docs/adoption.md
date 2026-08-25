@@ -12,6 +12,7 @@ crates/
   <product>-contract/
   <product>-acceptance/
     src/stories/
+  <product>-android-playtest/  # when physical Android is supported
 scripts/test-gui
 ```
 
@@ -25,6 +26,13 @@ appear only after a second product reveals repeated syntax.
 Acceptance defines a deliberately partial `Deserialize` observation. It may
 reuse contract enums but should not depend on the GUI's witness struct or
 mirror the product model wholesale.
+
+A cross-platform product score is a function generic over a product-owned
+trait extending `Choreography`. Methods name semantic acts such as “raise the
+Inspector” or “select forecast field”; they do not carry coordinates, ADB
+commands, X11 keys, or waits. Desktop and Android adapters implement that
+trait as Projections. `Silent`, film, trace, and profiler Observers consume the
+same emitted stream, so evidence modes cannot acquire rival scripts.
 
 ## Build Classes
 
@@ -59,6 +67,15 @@ samples continuously against its invariant film clock; use
 into `EncodingProfile::Showpiece`.
 The latter records through a lossless RGB staging film before its slow final
 transcode, preserving real-time sampling under expensive compression.
+
+An Android performance run attaches `AndroidPerfetto` to
+`AndroidChoreography`. Start profiling before the first score act and keep ADB
+screenshot capture outside the measured interval. The sidecar JSONL gives
+semantic causal order; use device trace slices, not host timestamps, for
+Android wall-clock verdicts.
+Scenarios that require a canonical first-run specimen may expose an explicit
+destructive option backed by `AndroidDevice::clear_app_data`; preserving state
+remains the default, and clearing is never an implicit choreography prelude.
 
 ## Publisher Lifecycle
 

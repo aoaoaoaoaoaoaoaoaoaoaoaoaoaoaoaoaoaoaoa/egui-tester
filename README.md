@@ -34,6 +34,14 @@ The Wayland coordinate owns a private headless Weston launch-and-capture smoke.
 It proves isolated first present and nonblack compositor output, but carries no
 native-input or acceptance-parity claim.
 
+Android provides a physical-device Projection through ADB. It injects taps,
+swipes, keys, and genuine two-pointer UiAutomation gestures; captures the
+display; and can attach a Perfetto Observer to the same semantic choreography
+used by playtests and films. This rail is not hermetic and does not yet have a
+sealed semantic witness or acceptance parity with X11. Its JSONL event sidecar
+records host causal order, not a clock directly comparable with device trace
+timestamps.
+
 `egui-tester-witness` is the portable product-side seam. Its journal and
 cross-process monotonic clock are release-tested on Linux, macOS, and Windows;
 the input, capture, and containment harness remains X11-specific.
