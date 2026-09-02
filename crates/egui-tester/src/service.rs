@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use libseccomp::{ScmpAction, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall};
+
 use crate::{
     Error, FrameProbe, Probe, Result,
     error::io,
@@ -236,6 +238,8 @@ impl<'a> Application<'a> {
             remove_stale(&witness.frame_host, "remove stale frame journal")?;
         }
 
+        let sxid_filter = testbed.host_path(format!("runtime/app-{ordinal}.seccomp"));
+        forge_sxid_guillotine(&sxid_filter)?;
         let bwrap = bwrap_argv(testbed, &command, &binary, &borrows, witness.as_ref())?;
         let mut systemd = testbed.user_command("systemd-run");
         let _command = systemd
@@ -252,7 +256,6 @@ impl<'a> Application<'a> {
                 "--property=ProtectSystem=strict",
                 "--property=ProtectHome=read-only",
                 "--property=NoNewPrivileges=yes",
-                "--property=RestrictSUIDSGID=yes",
                 "--property=LockPersonality=yes",
                 "--property=RestrictRealtime=yes",
                 "--property=ProtectKernelModules=yes",
@@ -280,6 +283,10 @@ impl<'a> Application<'a> {
                 "--property=StandardError=append:{}",
                 stderr.display()
             ));
+        let _command = systemd.arg(format!(
+            "--property=StandardInput=file:{}",
+            sxid_filter.display()
+        ));
         if command.network == Network::Deny {
             let _command = systemd.args([
                 "--property=PrivateNetwork=yes",
@@ -536,6 +543,8 @@ fn bwrap_argv(
         "--new-session",
         "--cap-drop",
         "ALL",
+        "--seccomp",
+        "0",
         "--clearenv",
         "--ro-bind",
         "/usr",
@@ -628,6 +637,96 @@ fn bwrap_argv(
     ]);
     args.extend(command.args.iter().cloned());
     Ok(args)
+}
+
+fn forge_sxid_guillotine(path: &Path) -> Result<()> {
+    let mut filter = ScmpFilterContext::new(ScmpAction::Allow).map_err(sxid_fault("create"))?;
+    for (syscall, mode_argument) in [
+        ("fchmod", 1),
+        ("fchmodat", 2),
+        ("fchmodat2", 2),
+        ("mkdirat", 2),
+        ("mknodat", 2),
+    ] {
+        sever_sxid_modes(&mut filter, syscall, mode_argument)?;
+    }
+    #[cfg(target_arch = "x86_64")]
+    for (syscall, mode_argument) in [("chmod", 1), ("mkdir", 1), ("mknod", 1), ("creat", 1)] {
+        sever_sxid_modes(&mut filter, syscall, mode_argument)?;
+    }
+    sever_sxid_creation(&mut filter, "openat", 2, 3)?;
+    #[cfg(target_arch = "x86_64")]
+    sever_sxid_creation(&mut filter, "open", 1, 2)?;
+
+    // systemd's outer RestrictSUIDSGID filter blocks openat2 because seccomp
+    // cannot inspect its indirect mode. Apply the same rule only after
+    // Bubblewrap has used openat2 to construct the mount namespace safely.
+    let openat2 = sxid_syscall("openat2")?;
+    let _filter = filter
+        .add_rule(ScmpAction::Errno(libc::ENOSYS), openat2)
+        .map_err(sxid_fault("deny openat2"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| io("create seccomp filter directory", parent, err))?;
+    }
+    let file = std::fs::File::create(path).map_err(|err| io("create seccomp filter", path, err))?;
+
+    filter
+        .export_bpf(file)
+        .map_err(sxid_fault("export BPF filter"))
+}
+
+fn sever_sxid_modes(filter: &mut ScmpFilterContext, name: &str, mode_argument: u32) -> Result<()> {
+    let syscall = sxid_syscall(name)?;
+    for bit in [libc::S_ISUID, libc::S_ISGID] {
+        let comparisons = [ScmpArgCompare::new(
+            mode_argument,
+            ScmpCompareOp::MaskedEqual(u64::from(bit)),
+            u64::from(bit),
+        )];
+        let _filter = filter
+            .add_rule_conditional_exact(ScmpAction::Errno(libc::EPERM), syscall, &comparisons)
+            .map_err(sxid_fault("deny SUID/SGID mode"))?;
+    }
+    Ok(())
+}
+
+fn sever_sxid_creation(
+    filter: &mut ScmpFilterContext,
+    name: &str,
+    flags_argument: u32,
+    mode_argument: u32,
+) -> Result<()> {
+    let syscall = sxid_syscall(name)?;
+    for bit in [libc::S_ISUID, libc::S_ISGID] {
+        let comparisons = [
+            ScmpArgCompare::new(
+                flags_argument,
+                ScmpCompareOp::MaskedEqual(libc::O_CREAT as u64),
+                libc::O_CREAT as u64,
+            ),
+            ScmpArgCompare::new(
+                mode_argument,
+                ScmpCompareOp::MaskedEqual(u64::from(bit)),
+                u64::from(bit),
+            ),
+        ];
+        let _filter = filter
+            .add_rule_conditional_exact(ScmpAction::Errno(libc::EPERM), syscall, &comparisons)
+            .map_err(sxid_fault("deny SUID/SGID creation"))?;
+    }
+    Ok(())
+}
+
+fn sxid_syscall(name: &str) -> Result<ScmpSyscall> {
+    ScmpSyscall::from_name(name).map_err(sxid_fault("resolve syscall"))
+}
+
+fn sxid_fault(operation: &'static str) -> impl FnOnce(libseccomp::error::SeccompError) -> Error {
+    move |error| Error::Containment {
+        layer: "payload seccomp",
+        detail: format!("{operation}: {error}"),
+    }
 }
 
 fn sealed_environment(

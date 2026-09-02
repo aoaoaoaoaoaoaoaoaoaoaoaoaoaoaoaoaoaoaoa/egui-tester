@@ -24,6 +24,13 @@ fn main() -> eframe::Result {
             }
             audit_denial(Path::new(&path));
         }
+        Some(flag) if flag == std::ffi::OsStr::new("--try-sxid") => {
+            let Some(path) = args.next() else {
+                eprintln!("--try-sxid requires a path");
+                std::process::exit(64);
+            };
+            audit_sxid_denial(Path::new(&path));
+        }
         Some(flag) => {
             eprintln!("unknown fixture flag `{}`", flag.to_string_lossy());
             std::process::exit(64);
@@ -75,6 +82,37 @@ fn audit_denial(path: &Path) -> ! {
                 path.display()
             );
             std::process::exit(73);
+        }
+    }
+}
+
+fn audit_sxid_denial(path: &Path) -> ! {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if let Err(err) = std::fs::write(path, b"payload") {
+        eprintln!("could not create private SUID/SGID probe: {err}");
+        std::process::exit(74);
+    }
+    let mut permissions = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.permissions(),
+        Err(err) => {
+            eprintln!("could not inspect private SUID/SGID probe: {err}");
+            std::process::exit(74);
+        }
+    };
+    permissions.set_mode(0o6755);
+    match std::fs::set_permissions(path, permissions) {
+        Ok(()) => {
+            eprintln!("CONTAINMENT BREACH: payload created a SUID/SGID executable");
+            std::process::exit(70);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("payload SUID/SGID creation denied: {err}");
+            std::process::exit(73);
+        }
+        Err(err) => {
+            eprintln!("unexpected SUID/SGID probe failure: {err}");
+            std::process::exit(74);
         }
     }
 }

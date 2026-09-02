@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 bitflags.workspace = true
 egui-tester-witness.workspace = true
+libc.workspace = true
+libseccomp.workspace = true
 png.workspace = true
 rustix.workspace = true
 serde.workspace = true

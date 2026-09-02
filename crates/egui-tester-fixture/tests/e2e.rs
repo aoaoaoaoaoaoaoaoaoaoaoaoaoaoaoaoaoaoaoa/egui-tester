@@ -1,4 +1,4 @@
-use std::{fs, time::Duration};
+use std::{fs, os::unix::fs::PermissionsExt as _, time::Duration};
 
 use eframe as _;
 use egui_tester::{
@@ -187,6 +187,40 @@ fn read_only_borrow_denies_a_real_write() {
         !doomed_root.exists(),
         "testbed left its private filesystem behind"
     );
+}
+
+#[test]
+fn payload_cannot_forge_suid_or_sgid_executables() {
+    let testbed = Testbed::raise().expect("raise hermetic testbed");
+    let probe = testbed
+        .private_path("sxid-probe")
+        .expect("resolve private SUID/SGID probe");
+    let app = testbed
+        .launch(
+            AppCommand::new(FIXTURE)
+                .args(["--try-sxid", "/test/sxid-probe"])
+                .runtime(Duration::from_secs(10)),
+        )
+        .expect("launch SUID/SGID attack fixture");
+    let exit = app
+        .wait(Duration::from_secs(5))
+        .expect("wait for denied SUID/SGID attack");
+    assert_eq!(exit.code, 73, "unexpected sandbox exit: {exit:#?}");
+    assert!(
+        exit.stderr.contains("payload SUID/SGID creation denied"),
+        "missing SUID/SGID denial: {}",
+        exit.stderr
+    );
+    assert_eq!(
+        fs::metadata(probe)
+            .expect("inspect SUID/SGID probe")
+            .permissions()
+            .mode()
+            & 0o6000,
+        0,
+        "payload retained a SUID or SGID bit"
+    );
+    app.terminate().expect("collect SUID/SGID attack cgroup");
 }
 
 #[test]

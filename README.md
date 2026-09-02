@@ -46,6 +46,10 @@ application binary; a synthetic `/dev`; private namespaces; and a writable,
 disposable `/test`. `HOME`, every XDG root, `TMPDIR`, logs, fixtures, and
 observations live beneath `/test`.
 
+Systemd prevents privilege acquisition and host writes while Bubblewrap applies
+the SUID/SGID creation filter to the application payload after constructing its
+namespace.
+
 Host data is absent by default. `AppCommand::borrow_read_only(path)` is the sole
 data aperture and has no writable counterpart. Network authority is denied
 unless declared. `Graphics::Software` uses the pinned lavapipe runtime with a

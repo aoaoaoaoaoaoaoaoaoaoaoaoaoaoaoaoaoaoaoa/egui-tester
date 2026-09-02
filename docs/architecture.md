@@ -86,10 +86,12 @@ The default guest mount graph is allowlisted:
 | declared borrows | read-only at the same absolute path |
 
 Systemd independently enforces a read-only host, a runtime limit,
-`NoNewPrivileges`, control-group termination, and network denial. Bubblewrap
-adds process, mount, IPC, UTS, and normally network namespaces. Software
-graphics sees only lavapipe. Host graphics adds discovered DRM, KFD, or NVIDIA
-character devices and read-only sysfs.
+`NoNewPrivileges`, control-group termination, and network denial. After
+constructing the guest mount graph, Bubblewrap applies a seccomp filter that
+denies payload creation of SUID/SGID filesystem objects. Bubblewrap also adds
+process, mount, IPC, UTS, and normally network namespaces. Software graphics
+sees only lavapipe. Host graphics adds discovered DRM, KFD, or NVIDIA character
+devices and read-only sysfs.
 
 The harness validates every environment override and reserves display,
 filesystem, loader, graphics, and witness authority variables. Private oracle
