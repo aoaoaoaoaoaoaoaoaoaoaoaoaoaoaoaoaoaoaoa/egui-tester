@@ -116,10 +116,9 @@ pub(super) fn exterior_candidates(
         .reply()
         .map_err(|error| fault("query window geometry", error))?;
     let screen = &connection.setup().roots[screen];
-    let screen_right = i16::try_from(screen.width_in_pixels.saturating_sub(1))
-        .map_or(i16::MAX, |coordinate| coordinate);
-    let screen_bottom = i16::try_from(screen.height_in_pixels.saturating_sub(1))
-        .map_or(i16::MAX, |coordinate| coordinate);
+    let screen_right = i16::try_from(screen.width_in_pixels.saturating_sub(1)).unwrap_or(i16::MAX);
+    let screen_bottom =
+        i16::try_from(screen.height_in_pixels.saturating_sub(1)).unwrap_or(i16::MAX);
     let right = i32::from(left) + i32::from(geometry.width);
     let bottom = i32::from(top) + i32::from(geometry.height);
     let outside = |(x, y): (i16, i16)| {

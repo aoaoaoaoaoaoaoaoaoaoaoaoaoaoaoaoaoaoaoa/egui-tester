@@ -12,14 +12,14 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/egui-tester"
-rust-version = "1.96"
+rust-version = "1.98.0"
 version = "0.9.8"
 
 [workspace.dependencies]
 bitflags = "2.13.1"
 egui = "0.36.1"
 egui-tester-witness = { path = "crates/egui-tester-witness", version = "0.9.8" }
-libc = "0.2.183"
+libc = "0.2.189"
 libseccomp = "0.4.0"
 font8x8 = "0.3.1"
 png = "0.18.1"

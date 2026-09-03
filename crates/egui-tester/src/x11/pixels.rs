@@ -8,9 +8,11 @@ pub(super) fn decode(image: &Image<'_>, red_mask: u32, green_mask: u32, blue_mas
     if image.bits_per_pixel() == BitsPerPixel::B32 && (red_mask, green_mask, blue_mask) == RGB888 {
         for (source, target) in image
             .data()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(pixels)
-            .zip(rgba.chunks_exact_mut(4))
+            .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
         {
             match image.byte_order() {
                 ImageOrder::LsbFirst => {

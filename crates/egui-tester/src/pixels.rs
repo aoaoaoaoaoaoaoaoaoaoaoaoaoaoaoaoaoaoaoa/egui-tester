@@ -213,7 +213,9 @@ impl Frame {
         let rgba = match info.color_type {
             png::ColorType::Rgba => bytes,
             png::ColorType::Rgb => bytes
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .collect(),
             png::ColorType::Grayscale => bytes
@@ -221,7 +223,9 @@ impl Frame {
                 .flat_map(|gray| [gray, gray, gray, 255])
                 .collect(),
             png::ColorType::GrayscaleAlpha => bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .flat_map(|pair| [pair[0], pair[0], pair[0], pair[1]])
                 .collect(),
             png::ColorType::Indexed => {

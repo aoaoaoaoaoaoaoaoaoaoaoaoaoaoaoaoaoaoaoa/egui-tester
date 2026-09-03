@@ -43,7 +43,9 @@ fn launches_and_captures_on_headless_wayland() {
             .expect("capture Weston's virtual output");
         if pixels
             .rgba()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[..3] != [0, 0, 0])
         {
             break pixels;
