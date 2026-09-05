@@ -165,7 +165,7 @@ fn final_egui_pass_projects_only_presented_targets_and_focus() {
             );
             ui.ctx().request_discard("exercise final-pass telemetry");
         }
-        let blade = ui.button("blade");
+        let blade = ui.allocate_response(::egui::vec2(60.0, 20.0), ::egui::Sense::click());
         blade.request_focus();
         egui::record_response(ui, "blade", &blade);
     })
