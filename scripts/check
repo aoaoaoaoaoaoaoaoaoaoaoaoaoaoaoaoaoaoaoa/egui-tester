@@ -4,6 +4,7 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+scripts/cells
 ./check.py verify
-shellcheck scripts/audit scripts/check scripts/check-witness scripts/package scripts/release \
+shellcheck scripts/audit scripts/cells scripts/check scripts/check-witness scripts/package scripts/release \
     scripts/test-wayland scripts/test-x11

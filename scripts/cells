@@ -1,0 +1,16 @@
+#!/bin/sh
+# Substrate cell walls: this chamber depends on nothing downstream of it.
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+fail() {
+    printf 'cell-wall violation: %s\n' "$1" >&2
+    exit 1
+}
+
+crossing=$(cargo metadata --no-deps --format-version 1 |
+    jq -r '[.packages[].dependencies[] | select(.name == "brass_poolrooms" or .name == "eternalist-apps") | .name] | join(" ")')
+[ -z "$crossing" ] || fail "$crossing crosses the cell wall"
+printf '%s\n' 'cell walls closed'
