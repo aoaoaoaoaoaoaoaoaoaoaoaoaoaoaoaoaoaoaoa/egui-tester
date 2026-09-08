@@ -37,10 +37,14 @@ cd "$root"
 grep -Eq '^\[patch\.' Cargo.toml && die 'Cargo.toml carries a [patch] section; release from registry dependencies only'
 repository=$(pwd -P)
 git ls-files -- Cargo.toml '*/Cargo.toml' | while IFS= read -r manifest; do
-    sed -n 's/.*path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | while IFS= read -r dependency; do
-        target=$(cd "$(dirname "$manifest")/$dependency" 2>/dev/null && pwd -P) || exit 1
+    sed -n -e 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+        -e 's/.*[{,][[:space:]]*path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" |
+    while IFS= read -r dependency; do
+        candidate=$(dirname "$manifest")/$dependency
+        [ -d "$candidate" ] || continue
+        target=$(cd "$candidate" && pwd -P)
         case $target in
-            "$repository"/*) ;;
+            "$repository" | "$repository"/*) ;;
             *) exit 1 ;;
         esac
     done || exit 1
