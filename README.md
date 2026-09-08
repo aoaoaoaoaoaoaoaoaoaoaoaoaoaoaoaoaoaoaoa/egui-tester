@@ -187,7 +187,7 @@ first present, and capture. CI judges those Linux harness proofs separately
 from the portable witness matrix on Linux, both macOS architectures, and
 Windows. It does not imply Wayland input or acceptance parity.
 
-`scripts/release VERSION publish` is the sole publication entrypoint. It proves
+The Poolrooms line's `scripts/release egui_tester VERSION --publish` is the sole publication entrypoint. It proves
 the three publishable packages, then publishes the product-side witness,
 harness, and optional film observer in dependency order from the same signed
 tag, waiting at each registry boundary.
