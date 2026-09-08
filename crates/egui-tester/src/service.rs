@@ -617,6 +617,19 @@ fn bwrap_argv(
     }
     if command.network == Network::Deny {
         args.push(OsString::from("--unshare-net"));
+    } else {
+        // Hosts that manage `/etc/resolv.conf` as a symlink into `/run` would
+        // otherwise leave the guest a dangling resolver behind the synthetic
+        // `/run`; bind the canonical file at its own path so the link resolves.
+        if let Ok(resolver) = std::fs::canonicalize("/etc/resolv.conf")
+            && !resolver.starts_with("/etc")
+        {
+            args.extend([
+                OsString::from("--ro-bind"),
+                resolver.as_os_str().to_owned(),
+                resolver.into_os_string(),
+            ]);
+        }
     }
     testbed.display_seal().append_bwrap(&mut args);
     for borrow in borrows {
