@@ -35,9 +35,16 @@ cd "$root"
 [ "$(git branch --show-current)" = main ] || die 'release checkout is not main'
 [ -z "$(git status --porcelain)" ] || die 'worktree is dirty'
 grep -Eq '^\[patch\.' Cargo.toml && die 'Cargo.toml carries a [patch] section; release from registry dependencies only'
-grep -rEq --include=Cargo.toml --exclude-dir=target --exclude-dir=.git --exclude-dir=.worktrees --exclude-dir=vendor \
-    'path[[:space:]]*=[[:space:]]*"\.\./' . &&
-    die 'a manifest depends on a path outside the repository; release from registry dependencies only'
+repository=$(pwd -P)
+git ls-files -- Cargo.toml '*/Cargo.toml' | while IFS= read -r manifest; do
+    sed -n 's/.*path[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | while IFS= read -r dependency; do
+        target=$(cd "$(dirname "$manifest")/$dependency" 2>/dev/null && pwd -P) || exit 1
+        case $target in
+            "$repository"/*) ;;
+            *) exit 1 ;;
+        esac
+    done || exit 1
+done || die 'a manifest depends on a path outside the repository; release from registry dependencies only'
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
     die 'HEAD is not the pushed origin/main commit'
 grep -Fqx "version = \"$version\"" Cargo.toml ||
