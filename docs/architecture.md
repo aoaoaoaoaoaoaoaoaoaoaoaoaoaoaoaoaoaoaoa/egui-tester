@@ -51,6 +51,9 @@ may retain evidence but has no product-mutation authority.
 **Story** is one effectful execution of Choreography through a Projection and
 Observer.
 
+**Playtest** is a Story performed on a physical device for evidence. It is
+not a Foundry law: acceptance stays the hermetic testbed proof.
+
 **Fixture** is deterministic input and environment owned by the acceptance
 executable. It is not a product backdoor or substitute implementation.
 

@@ -6,5 +6,5 @@ cd "$root"
 
 scripts/cells
 ./check.py verify
-shellcheck scripts/audit scripts/cells scripts/check scripts/check-witness scripts/package \
-    scripts/test-wayland scripts/test-x11
+shellcheck scripts/audit scripts/build-android-driver scripts/cells scripts/check \
+    scripts/check-witness scripts/package scripts/test-wayland scripts/test-x11
