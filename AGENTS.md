@@ -1,10 +1,5 @@
-# Project Instructions
+egui_tester: hermetic black-box acceptance testing for native egui apps
 
-Read and follow the canonical
-[Rust style doctrine](/home/main/programming/projects/rust_starter/docs/rust-style-doctrine.md)
-before making meaningful Rust style decisions.
-
-This project treats containment claims as executable contracts. Never weaken a
-hermeticity failure into a warning or silently fall back to the caller's
-desktop, home directory, session bus, network namespace, or writable host
-filesystem.
+## invariants
+- Containment claims are executable contracts; never weaken hermeticity failure into warning
+- Never silently fall back to caller's desktop, home dir, session bus, network namespace, or writable host fs
