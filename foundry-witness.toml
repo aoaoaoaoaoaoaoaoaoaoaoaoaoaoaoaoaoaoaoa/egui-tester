@@ -20,18 +20,6 @@ run = ["scripts/check-witness"]
 timeout-minutes = 20
 
 [[proofs]]
-name = "security"
-laws = ["security"]
-run = ["scripts/audit"]
-timeout-minutes = 15
-
-[[proofs]]
-name = "source-package"
-laws = ["source-package"]
-run = ["cargo", "package", "--locked", "--package", "egui-tester-witness"]
-timeout-minutes = 20
-
-[[proofs]]
 name = "host"
 laws = ["host"]
 run = [

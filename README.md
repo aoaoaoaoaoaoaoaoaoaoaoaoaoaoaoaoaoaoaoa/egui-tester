@@ -183,7 +183,7 @@ the tester.
 
 ```console
 ./check.py verify
-scripts/audit
+cargo audit --deny warnings
 scripts/test-x11
 scripts/test-wayland
 ```

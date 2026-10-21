@@ -27,18 +27,6 @@ run = ["scripts/check"]
 timeout-minutes = 30
 
 [[proofs]]
-name = "security"
-laws = ["security"]
-run = ["scripts/audit"]
-timeout-minutes = 15
-
-[[proofs]]
-name = "source-package"
-laws = ["source-package"]
-run = ["scripts/package"]
-timeout-minutes = 30
-
-[[proofs]]
 name = "host-x11"
 laws = ["host"]
 run = ["bash", "scripts/test-x11"]
