@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+  # zbus 6 absorbed zvariant, zvariant_derive and zbus_names; accesskit's AT-SPI
+  # bridge under egui-winit 0.36 still resolves zbus 5. Maintenance status, not
+  # a vulnerability; drop these once accesskit reaches zbus 6.
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
+]
