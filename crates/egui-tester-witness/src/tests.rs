@@ -70,11 +70,11 @@ fn observation_journal_retains_brief_and_partial_records() {
         reader.read_new::<Mark>().expect("first read"),
         vec![Mark { value: 1 }]
     );
-    assert!(
+    assert_eq!(
         reader
             .read_new::<Mark>()
-            .expect("partial tail is not corruption")
-            .is_empty()
+            .expect("partial tail is not corruption"),
+        []
     );
 
     output
