@@ -10,9 +10,8 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    ActionReceipt, Choreography, Error, Frame, Result, Silent, StoryCue, StoryEvent, StoryFact,
-    StoryObserver, StorySurface, StoryTempo, X11CursorImage,
-    story::{CaptureSurface, still_cue},
+    ActionReceipt, ArtifactStem, Choreography, Cursor, Error, Frame, Result, Silent, StoryCue,
+    StoryEvent, StoryFact, StoryObserver, StorySurface, StoryTempo, story::CaptureSurface,
 };
 
 const DRIVER: &str = "moe.swarm.eguitester.driver/moe.swarm.eguitester.driver.Driver";
@@ -250,11 +249,26 @@ impl<'device> AndroidChoreography<'device, Silent> {
         })
     }
 
-    pub fn with_observer<O: StoryObserver>(self, observer: O) -> AndroidChoreography<'device, O> {
-        AndroidChoreography {
+    /// Attach one optional consumer. A device screen cannot be reframed, so an
+    /// observer's framing must already be the screen's.
+    pub fn with_observer<O: StoryObserver>(
+        self,
+        observer: O,
+    ) -> Result<AndroidChoreography<'device, O>> {
+        if let Some(framing) = observer.framing() {
+            let [width, height] = self.session.device.screen_size()?;
+            if !framing.frames(width, height) {
+                return Err(Error::Framing {
+                    framing,
+                    width,
+                    height,
+                });
+            }
+        }
+        Ok(AndroidChoreography {
             session: self.session,
             observer,
-        }
+        })
     }
 }
 
@@ -271,8 +285,12 @@ impl<O: StoryObserver> AndroidChoreography<'_, O> {
         self.emit(StoryEvent::Cue(StoryCue::Tempo { tempo }))
     }
 
-    pub fn still(&mut self, name: &str) -> Result<()> {
-        self.emit(still_cue(name)?)
+    /// Offer observers the screen as the publishable still `name` at once.
+    /// Unlike a desktop story's still, it cannot wait for the presentation
+    /// to rest: this projection reads no product witness, so it has no pass
+    /// to watch. Precede it with [`Self::settle`] when motion may linger.
+    pub fn still(&mut self, name: &ArtifactStem) -> Result<()> {
+        self.emit(StoryEvent::Cue(StoryCue::Still { name }))
     }
 
     pub fn capture(&self) -> Result<Frame> {
@@ -434,7 +452,7 @@ impl<O: StoryObserver> Choreography for AndroidChoreography<'_, O> {
         Self::tempo(self, tempo)
     }
 
-    fn still(&mut self, name: &str) -> Result<()> {
+    fn still(&mut self, name: &ArtifactStem) -> Result<()> {
         Self::still(self, name)
     }
 }
@@ -459,7 +477,7 @@ impl CaptureSurface for AndroidSession<'_> {
         Frame::load_png(png.path())
     }
 
-    fn cursor(&self) -> Result<Option<X11CursorImage>> {
+    fn cursor(&self) -> Result<Option<Cursor>> {
         Ok(None)
     }
 }

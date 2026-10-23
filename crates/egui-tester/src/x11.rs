@@ -26,19 +26,21 @@ use x11rb::{
 use xkeysym::Keysym;
 
 use crate::{
-    ActionReceipt, Application, Button, Drag, Error, Frame, Key, Modifiers, Motion, PixelRegion,
-    Probe, Result, Stroke, Testbed, Wheel,
+    ActionReceipt, Application, Button, Cursor, Error, Frame, Key, Modifiers, PixelRegion, Probe,
+    Result, Testbed,
 };
 
 mod controller;
 mod cursor;
 mod embedded;
+mod gesture;
 mod keymap;
 mod pixels;
 mod window;
 
 pub use controller::X11Controller;
-pub use cursor::X11CursorImage;
+pub(crate) use gesture::Rest;
+use keymap::Keymap;
 
 const AUTH_PROTOCOL: &[u8] = b"MIT-MAGIC-COOKIE-1";
 const MODIFIER_GUARD: Duration = Duration::from_millis(32);
@@ -246,28 +248,6 @@ impl X11Controller {
         Ok((reply.win_x, reply.win_y))
     }
 
-    pub fn motion(
-        &self,
-        window: &Window,
-        from: (i16, i16),
-        to: (i16, i16),
-        policy: Motion,
-    ) -> Result<ActionReceipt> {
-        if policy.steps == 0 {
-            return Err(Error::X11 {
-                operation: "transport pointer",
-                detail: "pointer motion requires at least one step".to_owned(),
-            });
-        }
-        self.move_to(window, from.0, from.1)?;
-        let receipt = ActionReceipt::begin(format!(
-            "pointer motion ({}, {}) → ({}, {})",
-            from.0, from.1, to.0, to.1
-        ));
-        self.transport(window, from, to, policy.steps, policy.duration)?;
-        Ok(receipt.trigger().finish())
-    }
-
     pub fn click(&self, window: &Window, x: i16, y: i16, button: Button) -> Result<ActionReceipt> {
         self.modified_click(window, x, y, button, Modifiers::empty())
     }
@@ -281,7 +261,7 @@ impl X11Controller {
         modifiers: Modifiers,
     ) -> Result<ActionReceipt> {
         self.move_to(window, x, y)?;
-        let held = self.press_modifiers(modifiers)?;
+        let held = self.hold(modifiers)?;
         if let Err(err) = self.flush("acquire click modifiers") {
             self.release_keycodes(&held);
             let _flushed = self.flush("recover click modifiers");
@@ -291,7 +271,7 @@ impl X11Controller {
             thread::sleep(MODIFIER_GUARD);
         }
         let receipt = ActionReceipt::begin(format!("{modifiers:?} {button:?} click at ({x}, {y})"));
-        let result = (|| {
+        let result = (|| -> Result<()> {
             self.fake(BUTTON_PRESS_EVENT, button as u8, 0, 0)?;
             self.fake(BUTTON_RELEASE_EVENT, button as u8, 0, 0)?;
             self.flush("click pointer")?;
@@ -327,113 +307,27 @@ impl X11Controller {
         Ok(receipt.finish())
     }
 
-    pub fn scroll(
-        &self,
-        window: &Window,
-        x: i16,
-        y: i16,
-        vertical_ticks: i32,
-    ) -> Result<ActionReceipt> {
-        self.wheel(
-            window,
-            x,
-            y,
-            vertical_ticks,
-            Wheel {
-                tick_duration: Duration::ZERO,
-            },
-        )
-    }
-
-    pub fn wheel(
-        &self,
-        window: &Window,
-        x: i16,
-        y: i16,
-        vertical_ticks: i32,
-        policy: Wheel,
-    ) -> Result<ActionReceipt> {
-        self.move_to(window, x, y)?;
-        let mut receipt =
-            ActionReceipt::begin(format!("scroll {vertical_ticks} ticks at ({x}, {y})"));
-        let detail = if vertical_ticks < 0 { 4 } else { 5 };
-        let count = vertical_ticks.unsigned_abs();
-        for tick in 0..count {
-            if tick + 1 == count {
-                receipt = receipt.trigger();
-            }
-            self.fake(BUTTON_PRESS_EVENT, detail, 0, 0)?;
-            self.fake(BUTTON_RELEASE_EVENT, detail, 0, 0)?;
-            self.flush("scroll pointer")?;
-            if tick + 1 < count && !policy.tick_duration.is_zero() {
-                thread::sleep(policy.tick_duration);
-            }
-        }
-        let receipt = receipt.finish();
-        if count > 0 {
-            thread::sleep(POINTER_DELIVERY_GUARD);
-        }
-        Ok(receipt)
-    }
-
-    pub fn modified_wheel(
-        &self,
-        window: &Window,
-        x: i16,
-        y: i16,
-        vertical_ticks: i32,
-        policy: Wheel,
-        modifiers: Modifiers,
-    ) -> Result<ActionReceipt> {
-        self.move_to(window, x, y)?;
-        let held = self.press_modifiers(modifiers)?;
-        if let Err(err) = self.flush("acquire wheel modifiers") {
-            self.release_keycodes(&held);
-            let _flushed = self.flush("recover wheel modifiers");
-            return Err(err);
-        }
-        if !held.is_empty() {
-            thread::sleep(MODIFIER_GUARD);
-        }
-        let result = self.wheel(window, x, y, vertical_ticks, policy);
-        self.release_keycodes(&held);
-        let released = self.flush("release wheel modifiers");
-        let receipt = result?;
-        released?;
-        let action = format!("{modifiers:?} {}", receipt.action());
-        Ok(receipt.relabel(action))
-    }
-
     pub fn key(&self, key: Key) -> Result<ActionReceipt> {
         self.chord(Modifiers::empty(), key)
     }
 
     pub fn chord(&self, modifiers: Modifiers, key: Key) -> Result<ActionReceipt> {
         let keysym = key.keysym()?;
-        self.lend([keysym])?;
-        let (keycode, shift) = self.keycode(keysym)?;
+        let keymap = self.lend([keysym])?;
+        let (keycode, shift) = keymap.keycode(keysym)?;
         let modifiers = if shift {
             modifiers | Modifiers::SHIFT
         } else {
             modifiers
         };
         let receipt = ActionReceipt::begin(format!("{modifiers:?}+{key:?}"));
-        let held = self.press_modifiers(modifiers)?;
-        let result = (|| {
-            self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
-            self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)?;
-            Ok(())
-        })();
-        self.release_keycodes(&held);
-        result?;
-        self.flush("send key")?;
+        self.strike(&keymap, keycode, modifiers)?;
         Ok(receipt.finish())
     }
 
     pub fn key_down(&self, key: Key) -> Result<ActionReceipt> {
         let keysym = key.keysym()?;
-        self.lend([keysym])?;
-        let (keycode, shift) = self.keycode(keysym)?;
+        let (keycode, shift) = self.lend([keysym])?.keycode(keysym)?;
         if shift {
             return Err(Error::Unsupported {
                 capability: "held shifted key",
@@ -448,8 +342,7 @@ impl X11Controller {
 
     pub fn key_up(&self, key: Key) -> Result<ActionReceipt> {
         let keysym = key.keysym()?;
-        self.lend([keysym])?;
-        let (keycode, shift) = self.keycode(keysym)?;
+        let (keycode, shift) = self.lend([keysym])?.keycode(keysym)?;
         if shift {
             return Err(Error::Unsupported {
                 capability: "held shifted key",
@@ -462,131 +355,42 @@ impl X11Controller {
         Ok(receipt.finish())
     }
 
+    /// Type `text` one stroke per character, resolving every keycode once.
     pub fn type_text(&self, text: &str) -> Result<ActionReceipt> {
-        self.lend(
-            text.chars()
-                .map(|character| Key::Character(character).keysym())
-                .collect::<Result<Vec<_>>>()?,
-        )?;
-        let mut receipt =
-            ActionReceipt::begin(format!("type {} character(s)", text.chars().count()));
-        let mut characters = text.chars().peekable();
-        while let Some(character) = characters.next() {
-            if characters.peek().is_none() {
+        let symbols = text
+            .chars()
+            .map(|character| Key::Character(character).keysym())
+            .collect::<Result<Vec<_>>>()?;
+        let keymap = self.lend(symbols.iter().copied())?;
+        let strokes = symbols
+            .into_iter()
+            .map(|symbol| keymap.keycode(symbol))
+            .collect::<Result<Vec<_>>>()?;
+        let mut receipt = ActionReceipt::begin(format!("type {} character(s)", strokes.len()));
+        for (index, &(keycode, shift)) in strokes.iter().enumerate() {
+            if index + 1 == strokes.len() {
                 receipt = receipt.trigger();
             }
-            let _receipt = self.key(Key::Character(character))?;
-        }
-        Ok(receipt.finish())
-    }
-
-    pub fn drag(
-        &self,
-        window: &Window,
-        from: (i16, i16),
-        to: (i16, i16),
-        policy: Drag,
-    ) -> Result<ActionReceipt> {
-        self.stroke(
-            window,
-            &[from, to],
-            Stroke {
-                button: policy.button,
-                press_duration: policy.press_duration,
-                steps_per_leg: policy.steps,
-                leg_duration: policy.duration,
-                knot_dwell: Duration::ZERO,
-            },
-        )
-    }
-
-    pub fn stroke(
-        &self,
-        window: &Window,
-        knots: &[(i16, i16)],
-        policy: Stroke,
-    ) -> Result<ActionReceipt> {
-        if knots.len() < 2 {
-            return Err(Error::X11 {
-                operation: "stroke pointer",
-                detail: "pointer stroke requires at least two knots".to_owned(),
-            });
-        }
-        if policy.steps_per_leg == 0 {
-            return Err(Error::X11 {
-                operation: "stroke pointer",
-                detail: "pointer stroke requires at least one step per leg".to_owned(),
-            });
-        }
-        let from = knots[0];
-        let to = *knots.last().unwrap_or(&from);
-        self.move_to(window, from.0, from.1)?;
-        let mut receipt = ActionReceipt::begin(format!(
-            "{:?} stroke {} knot(s) ({}, {}) → ({}, {})",
-            policy.button,
-            knots.len(),
-            from.0,
-            from.1,
-            to.0,
-            to.1
-        ));
-        self.fake(BUTTON_PRESS_EVENT, policy.button as u8, 0, 0)?;
-        self.flush("begin pointer stroke")?;
-        if !policy.press_duration.is_zero() {
-            thread::sleep(policy.press_duration);
-        }
-        for leg in knots.windows(2) {
-            let [from, to] = leg else {
-                continue;
+            let modifiers = if shift {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::empty()
             };
-            if let Err(err) = self.transport(
-                window,
-                *from,
-                *to,
-                policy.steps_per_leg,
-                policy.leg_duration,
-            ) {
-                let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
-                let _flushed = self.flush("abort pointer stroke");
-                return Err(err);
-            }
-            if !policy.knot_dwell.is_zero() {
-                thread::sleep(policy.knot_dwell);
-            }
+            self.strike(&keymap, keycode, modifiers)?;
         }
-        receipt = receipt.trigger();
-        if let Err(err) = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0) {
-            let _released = self.fake(BUTTON_RELEASE_EVENT, policy.button as u8, 0, 0);
-            let _flushed = self.flush("recover pointer stroke release");
-            return Err(err);
-        }
-        self.flush("finish pointer stroke")?;
         Ok(receipt.finish())
     }
 
-    fn transport(
-        &self,
-        window: &Window,
-        from: (i16, i16),
-        to: (i16, i16),
-        steps: u16,
-        duration: Duration,
-    ) -> Result<()> {
-        let pause = duration / u32::from(steps);
-        for step in 1..=steps {
-            let fraction = f64::from(step) / f64::from(steps);
-            let x = f64::from(from.0)
-                .mul_add(1.0 - fraction, f64::from(to.0) * fraction)
-                .round() as i16;
-            let y = f64::from(from.1)
-                .mul_add(1.0 - fraction, f64::from(to.1) * fraction)
-                .round() as i16;
-            self.move_to(window, x, y)?;
-            if step < steps && !pause.is_zero() {
-                thread::sleep(pause);
-            }
-        }
-        Ok(())
+    /// Press and release `keycode` with `modifiers` held around it.
+    fn strike(&self, keymap: &Keymap, keycode: u8, modifiers: Modifiers) -> Result<()> {
+        let held = self.press_modifiers(keymap, modifiers)?;
+        let result = (|| -> Result<()> {
+            self.fake(KEY_PRESS_EVENT, keycode, 0, 0)?;
+            self.fake(KEY_RELEASE_EVENT, keycode, 0, 0)
+        })();
+        self.release_keycodes(&held);
+        result?;
+        self.flush("send key")
     }
 
     pub fn capture(&self, window: &Window) -> Result<Frame> {
@@ -720,7 +524,15 @@ impl X11Controller {
         self.connection.flush().map_err(|err| x11(operation, err))
     }
 
-    fn press_modifiers(&self, modifiers: Modifiers) -> Result<Vec<u8>> {
+    /// Press `modifiers`, reading the keymap only when there is one to press.
+    fn hold(&self, modifiers: Modifiers) -> Result<Vec<u8>> {
+        if modifiers.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.press_modifiers(&self.keymap()?, modifiers)
+    }
+
+    fn press_modifiers(&self, keymap: &Keymap, modifiers: Modifiers) -> Result<Vec<u8>> {
         let mut held = Vec::new();
         for (flag, symbol) in [
             (Modifiers::SHIFT, Keysym::Shift_L),
@@ -731,7 +543,7 @@ impl X11Controller {
             if !modifiers.contains(flag) {
                 continue;
             }
-            let (keycode, _) = match self.keycode(symbol) {
+            let (keycode, _) = match keymap.keycode(symbol) {
                 Ok(binding) => binding,
                 Err(err) => {
                     self.release_keycodes(&held);
@@ -804,9 +616,9 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         self.app
     }
 
-    /// Read the pointer image from the session's sealed X11 display.
-    pub fn cursor_image(&self) -> Result<X11CursorImage> {
-        self.controller.cursor_image()
+    /// The pointer the session's sealed X11 display presents over the window.
+    pub fn cursor(&self) -> Result<Cursor> {
+        self.controller.cursor(&self.window)
     }
 
     /// Make the bound client the visible native input destination.
@@ -862,14 +674,6 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
     pub fn pointer(&self) -> Result<(i16, i16)> {
         self.app.ensure_running("query pointer")?;
         self.controller.pointer(&self.window)
-    }
-
-    pub fn motion(&self, to: (i16, i16), policy: Motion) -> Result<ActionReceipt> {
-        self.app.ensure_running("pointer transport")?;
-        let from = self.controller.pointer(&self.window)?;
-        let receipt = self.controller.motion(&self.window, from, to, policy)?;
-        self.record(&receipt)?;
-        Ok(receipt)
     }
 
     pub fn modified_click(
@@ -929,50 +733,6 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
     pub fn button_up(&self, button: Button) -> Result<ActionReceipt> {
         self.app.ensure_running("held pointer release")?;
         let receipt = self.controller.button_up(button)?;
-        self.record(&receipt)?;
-        Ok(receipt)
-    }
-
-    pub fn drag(&self, from: (i16, i16), to: (i16, i16), policy: Drag) -> Result<ActionReceipt> {
-        self.app.ensure_running("pointer drag")?;
-        let receipt = self.controller.drag(&self.window, from, to, policy)?;
-        self.record(&receipt)?;
-        Ok(receipt)
-    }
-
-    pub fn stroke(&self, knots: &[(i16, i16)], policy: Stroke) -> Result<ActionReceipt> {
-        self.app.ensure_running("pointer stroke")?;
-        let receipt = self.controller.stroke(&self.window, knots, policy)?;
-        self.record(&receipt)?;
-        Ok(receipt)
-    }
-
-    pub fn scroll(&self, x: i16, y: i16, ticks: i32) -> Result<ActionReceipt> {
-        self.app.ensure_running("pointer scroll")?;
-        let receipt = self.controller.scroll(&self.window, x, y, ticks)?;
-        self.record(&receipt)?;
-        Ok(receipt)
-    }
-
-    pub fn wheel(&self, x: i16, y: i16, ticks: i32, policy: Wheel) -> Result<ActionReceipt> {
-        self.app.ensure_running("pointer wheel gesture")?;
-        let receipt = self.controller.wheel(&self.window, x, y, ticks, policy)?;
-        self.record(&receipt)?;
-        Ok(receipt)
-    }
-
-    pub fn modified_wheel(
-        &self,
-        x: i16,
-        y: i16,
-        ticks: i32,
-        policy: Wheel,
-        modifiers: Modifiers,
-    ) -> Result<ActionReceipt> {
-        self.app.ensure_running("modified pointer wheel gesture")?;
-        let receipt =
-            self.controller
-                .modified_wheel(&self.window, x, y, ticks, policy, modifiers)?;
         self.record(&receipt)?;
         Ok(receipt)
     }

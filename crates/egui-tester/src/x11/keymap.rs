@@ -8,12 +8,13 @@ use super::{X11Controller, x11};
 /// `NoSymbol`: an empty keymap level.
 const NO_SYMBOL: u32 = 0;
 
-/// Keysyms of vendor keys (`XF86…`), outside the Latin-1 and named keys a
-/// story can strike.
-const VENDOR: std::ops::RangeInclusive<u32> = 0x1008_FF00..=0x1008_FFFF;
+/// Keysym ranges no [`Key`] can strike, whose keycodes a story may lend:
+/// vendor keys (`XF86…`), F13 through F35, and the keypad.
+const UNSTRIKABLE: [std::ops::RangeInclusive<u32>; 3] =
+    [0x1008_FF00..=0x1008_FFFF, 0xFFCA..=0xFFE0, 0xFF80..=0xFFBD];
 
 /// The server's core keymap: one row of levels per keycode from `first`.
-struct Keymap {
+pub(super) struct Keymap {
     first: u8,
     stride: usize,
     keysyms: Vec<u32>,
@@ -28,30 +29,28 @@ impl Keymap {
     }
 
     /// Keycodes no story can strike: those binding nothing, then those
-    /// binding only vendor symbols, which [`Key`] cannot name.
+    /// binding only symbols [`Key`] cannot name.
     fn spares(&self) -> impl Iterator<Item = u8> {
+        let unstrikable = |symbol: &u32| UNSTRIKABLE.iter().any(|range| range.contains(symbol));
         let rows = || (self.first..=u8::MAX).zip(self.keysyms.chunks(self.stride));
         let empty = rows()
             .filter(|(_, row)| row.iter().all(|&symbol| symbol == NO_SYMBOL))
             .map(|(keycode, _)| keycode);
-        let vendor = rows()
-            .filter(|(_, row)| {
-                row.iter().any(|symbol| VENDOR.contains(symbol))
+        let foreign = rows()
+            .filter(move |(_, row)| {
+                row.iter().any(unstrikable)
                     && row
                         .iter()
-                        .all(|&symbol| symbol == NO_SYMBOL || VENDOR.contains(&symbol))
+                        .all(|symbol| *symbol == NO_SYMBOL || unstrikable(symbol))
             })
             .map(|(keycode, _)| keycode);
-        empty.chain(vendor)
+        empty.chain(foreign)
     }
-}
 
-impl X11Controller {
-    /// The keycode typing `symbol` in group one, and whether Shift selects it. Other
-    /// groups are unreachable: injected strokes never switch group.
+    /// The keycode typing `symbol` in group one, and whether Shift selects it.
+    /// Other groups are unreachable: injected strokes never switch group.
     pub(super) fn keycode(&self, symbol: Keysym) -> Result<(u8, bool)> {
-        let keymap = self.keymap()?;
-        for (keycode, levels) in keymap.rows() {
+        for (keycode, levels) in self.rows() {
             if let Some(level) = levels
                 .iter()
                 .position(|&candidate| candidate == symbol.raw())
@@ -64,13 +63,16 @@ impl X11Controller {
             detail: format!("the X11 keymap has no binding for {symbol:?}"),
         })
     }
+}
 
+impl X11Controller {
     /// Bind every symbol group one cannot type to a free keycode, two Shift
     /// levels per keycode. Lent bindings stay for the private server's life:
     /// a client rereads the whole keymap when told it changed, so restoring a
     /// binding after its stroke could reach the client first and the stroke
-    /// would type nothing. The server dies with its testbed.
-    pub(super) fn lend(&self, symbols: impl IntoIterator<Item = Keysym>) -> Result<()> {
+    /// would type nothing. The server dies with its testbed. Returns the
+    /// keymap that binds every symbol.
+    pub(super) fn lend(&self, symbols: impl IntoIterator<Item = Keysym>) -> Result<Keymap> {
         let keymap = self.keymap()?;
         let mut missing = Vec::new();
         for symbol in symbols {
@@ -78,6 +80,9 @@ impl X11Controller {
             if !missing.contains(&raw) && !keymap.rows().any(|(_, levels)| levels.contains(&raw)) {
                 missing.push(raw);
             }
+        }
+        if missing.is_empty() {
+            return Ok(keymap);
         }
         let mut spares = keymap.spares();
         for pair in missing.chunks(2) {
@@ -95,10 +100,10 @@ impl X11Controller {
                 .check()
                 .map_err(|err| x11("lend keycode", err))?;
         }
-        Ok(())
+        self.keymap()
     }
 
-    fn keymap(&self) -> Result<Keymap> {
+    pub(super) fn keymap(&self) -> Result<Keymap> {
         let setup = self.connection.setup();
         let count = setup.max_keycode - setup.min_keycode + 1;
         let mapping = self

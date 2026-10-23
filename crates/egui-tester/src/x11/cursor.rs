@@ -16,9 +16,9 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
-use crate::{Error, Result};
+use crate::{Cursor, CursorImage, Error, Result};
 
-use super::{X11Controller, x11};
+use super::{Window, X11Controller, x11};
 
 /// Icon roots a product inside the testbed searches for cursor themes: its
 /// private home holds none, leaving only the system's.
@@ -27,21 +27,6 @@ const ICON_ROOTS: [&str; 2] = ["/usr/share/icons", "/usr/share/pixmaps"];
 const XCURSOR_IMAGE: u32 = 0xfffd_0002;
 /// `XC_left_ptr` in the core cursor font; its mask is the next glyph.
 const LEFT_PTR_GLYPH: u16 = 68;
-
-/// A pointer bitmap and its hotspot, as the X server projects it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct X11CursorImage {
-    /// Width of the server cursor bitmap in pixels.
-    pub width: u16,
-    /// Height of the server cursor bitmap in pixels.
-    pub height: u16,
-    /// Horizontal hotspot coordinate in bitmap pixels.
-    pub hotspot_x: u16,
-    /// Vertical hotspot coordinate in bitmap pixels.
-    pub hotspot_y: u16,
-    /// Row-major ARGB32 pixels, color premultiplied by alpha.
-    pub argb: Vec<u32>,
-}
 
 pub(super) fn prime(connection: &RustConnection) -> Result<()> {
     let _version = connection
@@ -53,37 +38,48 @@ pub(super) fn prime(connection: &RustConnection) -> Result<()> {
 }
 
 impl X11Controller {
-    /// Read the pointer image from this controller's sealed X11 display.
-    pub fn cursor_image(&self) -> Result<X11CursorImage> {
+    /// The pointer this controller's sealed X11 display presents, positioned
+    /// in `window`'s coordinates.
+    pub fn cursor(&self, window: &Window) -> Result<Cursor> {
         let image = self
             .connection
             .xfixes_get_cursor_image()
             .map_err(|err| x11("read pointer image", err))?
             .reply()
             .map_err(|err| x11("read pointer image", err))?;
-        Ok(X11CursorImage {
-            width: image.width,
-            height: image.height,
-            hotspot_x: image.xhot,
-            hotspot_y: image.yhot,
-            argb: image.cursor_image,
+        let (left, top) = self.window_origin(window)?;
+        Ok(Cursor {
+            position: [image.x.saturating_sub(left), image.y.saturating_sub(top)],
+            image: CursorImage {
+                width: image.width,
+                height: image.height,
+                hotspot_x: image.xhot,
+                hotspot_y: image.yhot,
+                argb: image.cursor_image,
+            },
         })
     }
 
     /// Define the root window's pointer as every desktop session does, like
-    /// `xsetroot -cursor_name left_ptr` through libXcursor: the themed
-    /// `left_ptr` a product in the testbed would load, at libXcursor's default
-    /// size, else the core font's arrow. Windows that define no pointer of
-    /// their own, as winit leaves its default, inherit it; a bare server would
-    /// show its `X_cursor` placeholder.
+    /// `xsetroot -cursor_name left_ptr` through libXcursor: the themed arrow a
+    /// product in the testbed would load, at libXcursor's default size, else
+    /// the core font's arrow. A bare server would show its `X_cursor`
+    /// placeholder instead. Windows that define no pointer inherit this one,
+    /// as winit 0.30's do at first: it starts every window on
+    /// `CursorIcon::Default` and defines nothing until egui asks for another
+    /// icon, after which a return to the default loads the same themed
+    /// `default`, else `left_ptr`, through libXcursor.
     pub(crate) fn dress_root(&self) -> Result<()> {
         let screen = &self.connection.setup().roots[self.screen];
         let size = u32::from(screen.width_in_pixels.min(screen.height_in_pixels) / 48);
-        let cursor = match theme_cursor("default", "left_ptr", 8)
+        let cursor = ["default", "left_ptr"]
+            .into_iter()
+            .find_map(|name| theme_cursor("default", name, 8))
             .and_then(|path| fs::read(path).ok())
             .and_then(|file| xcursor_image(&file, size))
-        {
-            Some(image) => self.render_cursor(screen.root, &image)?,
+            .and_then(|image| self.render_cursor(screen.root, &image).ok());
+        let cursor = match cursor {
+            Some(cursor) => cursor,
             None => self.glyph_cursor()?,
         };
         let connection = &self.connection;
@@ -94,7 +90,7 @@ impl X11Controller {
         dressed(connection.free_cursor(cursor))
     }
 
-    fn render_cursor(&self, root: u32, image: &X11CursorImage) -> Result<u32> {
+    fn render_cursor(&self, root: u32, image: &CursorImage) -> Result<u32> {
         let connection = &self.connection;
         let format = connection
             .render_query_pict_formats()
@@ -202,7 +198,7 @@ fn theme_cursor(theme: &str, name: &str, depth: u8) -> Option<PathBuf> {
 }
 
 /// The first image of the nominal size nearest `size` in an Xcursor file.
-fn xcursor_image(file: &[u8], size: u32) -> Option<X11CursorImage> {
+fn xcursor_image(file: &[u8], size: u32) -> Option<CursorImage> {
     let word = |at: usize| Some(u32::from_le_bytes(file.get(at..at + 4)?.try_into().ok()?));
     let index = |at: u32| usize::try_from(at).ok();
     if file.get(..4)? != b"Xcur" {
@@ -222,7 +218,7 @@ fn xcursor_image(file: &[u8], size: u32) -> Option<X11CursorImage> {
     let argb = (0..usize::from(width) * usize::from(height))
         .map(|pixel| word(pixels + 4 * pixel))
         .collect::<Option<_>>()?;
-    Some(X11CursorImage {
+    Some(CursorImage {
         width,
         height,
         hotspot_x: dimension(24)?,

@@ -1,12 +1,24 @@
-use std::{fmt::Display, num::NonZeroU16, thread, time::Duration};
+use std::{
+    fmt::Display,
+    num::NonZeroU16,
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
-    ActionReceipt, Anchor, Application, Button, Condition, Drag, Frame, Key, Modifiers, Motion,
-    Probe, ProbeFrame, ReactionBudget, Result, Stroke, Testbed, Timed, Wheel, WindowQuery,
-    X11CursorImage, X11Session,
+    ActionReceipt, Anchor, Application, Approach, ArtifactStem, Button, Condition, Cursor, Drag,
+    Error, Frame, Framing, Key, Modifiers, Motion, Probe, ProbeFrame, ReactionBudget, Result,
+    Stroke, Testbed, Timed, Wheel, WindowQuery, X11Session, x11::Rest,
 };
+
+/// Quiet a still's presentation keeps before its cue. Ambient animation under
+/// the testbed's software renderer presents a pass every 100–250 ms, so a
+/// transition still under way shows its next change well within this span.
+const STILL_REST: Duration = Duration::from_millis(400);
+/// Interval between the real pointer's steps on an approach glide.
+const GLIDE_STEP: Duration = Duration::from_millis(8);
 
 /// Persistent rate for observer-authored choreography.
 ///
@@ -49,14 +61,17 @@ impl Default for StoryTempo {
 /// Authored editorial instruction carried by a live story stream.
 ///
 /// A `Still` names the presented surface at that instant as one publishable
-/// still: a kebab-case artifact stem, unique within one take.
+/// still, unique within one take.
+///
+/// Cues, facts, and events are deliberately exhaustive: an observer meets a
+/// new kind at a compile error, never in a wildcard arm.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "cue", rename_all = "snake_case")]
 pub enum StoryCue<'a> {
     Chapter { title: &'a str },
     Hold { duration: Duration },
     Tempo { tempo: StoryTempo },
-    Still { name: &'a str },
+    Still { name: &'a ArtifactStem },
 }
 
 /// Immutable execution fact emitted while a story drives the product.
@@ -104,7 +119,7 @@ pub enum StoryEvent<'a> {
 
 pub(crate) trait CaptureSurface {
     fn capture(&self) -> Result<Frame>;
-    fn cursor(&self) -> Result<Option<X11CursorImage>>;
+    fn cursor(&self) -> Result<Option<Cursor>>;
 }
 
 impl CaptureSurface for X11Session<'_, '_> {
@@ -112,13 +127,13 @@ impl CaptureSurface for X11Session<'_, '_> {
         self.capture_ephemeral()
     }
 
-    fn cursor(&self) -> Result<Option<X11CursorImage>> {
-        self.cursor_image().map(Some)
+    fn cursor(&self) -> Result<Option<Cursor>> {
+        X11Session::cursor(self).map(Some)
     }
 }
 
 /// Capture-only view of the private product surface offered to observers:
-/// its pixels and the pointer bitmap the display server presents over them.
+/// its pixels and the pointer the display server presents over them.
 /// Neither read injects input or mutates the product.
 #[derive(Clone, Copy)]
 pub struct StorySurface<'a> {
@@ -134,9 +149,9 @@ impl StorySurface<'_> {
         self.surface.capture()
     }
 
-    /// The display server's pointer bitmap at this instant, or `None` on a
-    /// projection that presents no pointer, such as Android touch.
-    pub fn cursor(self) -> Result<Option<X11CursorImage>> {
+    /// The presented pointer at this instant, or `None` on a projection that
+    /// presents none, such as Android touch.
+    pub fn cursor(self) -> Result<Option<Cursor>> {
         self.surface.cursor()
     }
 }
@@ -158,6 +173,18 @@ pub trait StoryObserver {
         Ok(())
     }
 
+    /// The framing this observer's take demands. A desktop story imposes it
+    /// on the product window when the observer attaches.
+    fn framing(&self) -> Option<Framing> {
+        None
+    }
+
+    /// How a desktop story's real pointer closes on each aimed destination.
+    /// It is asked at every aim, so it may follow the tempo.
+    fn approach(&self) -> Approach {
+        Approach::INSTANT
+    }
+
     /// Whether this observer is admissible while production latency is judged.
     fn permits_performance_verdicts(&self) -> bool {
         false
@@ -177,8 +204,9 @@ pub trait Choreography {
 
     fn tempo(&mut self, tempo: StoryTempo) -> Result<()>;
 
-    /// Name the presented surface at this instant as one publishable still.
-    fn still(&mut self, name: &str) -> Result<()>;
+    /// Name the presented surface as one publishable still. Every projection
+    /// answers it, so an observer develops whatever the score names.
+    fn still(&mut self, name: &ArtifactStem) -> Result<()>;
 }
 
 /// Inert default observer used by ordinary acceptance stories.
@@ -203,6 +231,9 @@ pub struct Story<'app, 'bed, S, O = Silent> {
     reaction_budget: ReactionBudget,
     target_timeout: Duration,
     wait_timeout: Duration,
+    /// The framing imposed on the product window, and the monotonic instant
+    /// it was imposed.
+    framing: Option<(Framing, u64)>,
 }
 
 impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S, Silent> {
@@ -222,18 +253,27 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S, Silent> {
             reaction_budget,
             target_timeout: Duration::from_secs(8),
             wait_timeout: Duration::from_secs(10),
+            framing: None,
         })
     }
 
-    /// Attach one optional consumer before executing the story.
+    /// Attach one optional consumer before executing the story, imposing its
+    /// framing on the product window.
     pub fn with_observer<O: StoryObserver>(self, observer: O) -> Result<Story<'app, 'bed, S, O>> {
         if self.reaction_budget.production().is_some() && !observer.permits_performance_verdicts() {
-            return Err(crate::Error::Unsupported {
+            return Err(Error::Unsupported {
                 capability: "story observation during performance adjudication",
                 detail: "recording or tracing would contaminate the production latency verdict"
                     .to_owned(),
             });
         }
+        let framing = match observer.framing() {
+            Some(framing) => {
+                self.session.frame(framing)?;
+                Some((framing, egui_tester_witness::monotonic_ns()))
+            }
+            None => None,
+        };
         Ok(Story {
             session: self.session,
             probe: self.probe,
@@ -241,6 +281,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S, Silent> {
             reaction_budget: self.reaction_budget,
             target_timeout: self.target_timeout,
             wait_timeout: self.wait_timeout,
+            framing,
         })
     }
 }
@@ -272,11 +313,32 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         &mut self.probe
     }
 
+    /// Wait for the product's first presented pass. Under an observer's
+    /// framing, that is the first pass begun after the window was reframed,
+    /// and the window must then hold the framing.
     pub fn ready(&mut self, timeout: Duration) -> Result<ProbeFrame<S>> {
-        let result = self
-            .probe
-            .wait_surface_presented(self.session.application(), timeout);
-        self.retain_observation("first product frame to reach surface present", result)
+        const DESCRIPTION: &str = "first product frame to reach surface present";
+        let reframed_ns = self.framing.map_or(0, |(_, reframed_ns)| reframed_ns);
+        let result = self.probe.wait_inspecting(
+            self.session.application(),
+            timeout,
+            DESCRIPTION,
+            |frame| (frame.begun_ns >= reframed_ns).then_some(()).ok_or(None),
+            pace(&mut self.observer, &self.session),
+        );
+        let frame = self.retain_failure_frame(result)?;
+        if let Some((framing, _)) = self.framing {
+            let [width, height] = self.session.geometry()?;
+            if !framing.frames(width, height) {
+                return Err(Error::Framing {
+                    framing,
+                    width,
+                    height,
+                });
+            }
+        }
+        self.emit_observation(DESCRIPTION, &frame)?;
+        Ok(frame)
     }
 
     pub fn frame(&mut self) -> Result<ProbeFrame<S>> {
@@ -397,8 +459,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         let target = target.to_string();
         let anchor = self.anchor(target.as_str())?;
         let destination = anchor.center();
-        self.aim(Some(&target), destination, Some(&anchor))?;
-        let receipt = self.session.motion(destination, policy)?;
+        self.sight(Some(&target), destination, Some(&anchor))?;
+        let receipt =
+            self.paced(|session, rest| session.motion_paced(destination, policy, rest))?;
         self.emit_action(&receipt, Some(&target), Some(destination))?;
         Ok(self.reaction_named(receipt, format!("point at `{target}`")))
     }
@@ -408,8 +471,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         destination: (i16, i16),
         policy: Motion,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
-        self.aim(None, destination, None)?;
-        let receipt = self.session.motion(destination, policy)?;
+        self.sight(None, destination, None)?;
+        let receipt =
+            self.paced(|session, rest| session.motion_paced(destination, policy, rest))?;
         self.emit_action(&receipt, None, Some(destination))?;
         Ok(self.reaction(receipt))
     }
@@ -468,7 +532,8 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         let anchor = self.anchor(target.as_str())?;
         let origin = anchor.center();
         self.aim(Some(&target), origin, Some(&anchor))?;
-        let receipt = self.session.drag(origin, destination, policy)?;
+        let receipt =
+            self.paced(|session, rest| session.drag_paced(origin, destination, policy, rest))?;
         self.emit_action(&receipt, Some(&target), Some(destination))?;
         Ok(self.reaction_named(receipt, format!("drag `{target}`")))
     }
@@ -480,7 +545,8 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         policy: Drag,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         self.aim(None, origin, None)?;
-        let receipt = self.session.drag(origin, destination, policy)?;
+        let receipt =
+            self.paced(|session, rest| session.drag_paced(origin, destination, policy, rest))?;
         self.emit_action(&receipt, None, Some(destination))?;
         Ok(self.reaction(receipt))
     }
@@ -503,22 +569,18 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         let down = self.session.button_down(start.0, start.1, policy.button)?;
         let operation = (|| -> Result<(i16, i16)> {
             self.emit_action(&down, Some(&origin), Some(start))?;
-            if !policy.press_duration.is_zero() {
-                thread::sleep(policy.press_duration);
-            }
+            linger(&mut self.observer, &self.session, policy.press_duration)?;
             let _acquired = self
                 .reaction_named(down, format!("acquire `{origin}`"))
                 .next_frame()?;
             let destination_anchor = self.anchor(destination.as_str())?;
             let end = destination_anchor.center();
-            self.aim(Some(&destination), end, Some(&destination_anchor))?;
-            let motion = self.session.motion(
-                end,
-                Motion {
-                    steps: policy.steps,
-                    duration: policy.duration,
-                },
-            )?;
+            self.sight(Some(&destination), end, Some(&destination_anchor))?;
+            let transport = Motion {
+                steps: policy.steps,
+                duration: policy.duration,
+            };
+            let motion = self.paced(|session, rest| session.motion_paced(end, transport, rest))?;
             self.emit_action(&motion, Some(&destination), Some(end))?;
             Ok(end)
         })();
@@ -537,7 +599,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         if let Some(&origin) = knots.first() {
             self.aim(None, origin, None)?;
         }
-        let receipt = self.session.stroke(knots, policy)?;
+        let receipt = self.paced(|session, rest| session.stroke_paced(knots, policy, rest))?;
         self.emit_action(&receipt, None, knots.last().copied())?;
         Ok(self.reaction(receipt))
     }
@@ -549,7 +611,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         policy: Wheel,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         self.aim(None, point, None)?;
-        let receipt = self.session.wheel(point.0, point.1, ticks, policy)?;
+        let receipt = self.paced(|session, rest| {
+            session.wheel_paced(point.0, point.1, ticks, policy, Modifiers::empty(), rest)
+        })?;
         self.emit_action(&receipt, None, Some(point))?;
         Ok(self.reaction(receipt))
     }
@@ -562,9 +626,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         modifiers: Modifiers,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         self.aim(None, point, None)?;
-        let receipt = self
-            .session
-            .modified_wheel(point.0, point.1, ticks, policy, modifiers)?;
+        let receipt = self.paced(|session, rest| {
+            session.wheel_paced(point.0, point.1, ticks, policy, modifiers, rest)
+        })?;
         self.emit_action(&receipt, None, Some(point))?;
         Ok(self.reaction(receipt))
     }
@@ -575,7 +639,18 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         ticks: i32,
     ) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         self.aim(None, point, None)?;
-        let receipt = self.session.scroll(point.0, point.1, ticks)?;
+        let receipt = self.paced(|session, rest| {
+            session.wheel_paced(
+                point.0,
+                point.1,
+                ticks,
+                Wheel {
+                    tick_duration: Duration::ZERO,
+                },
+                Modifiers::empty(),
+                rest,
+            )
+        })?;
         self.emit_action(&receipt, None, Some(point))?;
         Ok(self.reaction(receipt))
     }
@@ -641,9 +716,23 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         self.emit(StoryEvent::Cue(StoryCue::Tempo { tempo }))
     }
 
-    /// Offer observers the presented surface as the publishable still `name`.
-    pub fn still(&mut self, name: &str) -> Result<()> {
-        self.emit(still_cue(name)?)
+    /// Offer observers the presented surface as the publishable still `name`
+    /// once the witnessed presentation rests: for 400 ms no presented pass
+    /// moves an anchor or changes the product state. Ambient animation that
+    /// changes neither continues into the still. The rest is an editorial
+    /// guard over witnessed passes, never a synchronization verdict, and a
+    /// presentation that never rests fails the story with what kept it moving.
+    pub fn still(&mut self, name: &ArtifactStem) -> Result<()> {
+        let description = format!("presentation at rest for still `{name}`");
+        let result = self.probe.wait_rest_paced(
+            self.session.application(),
+            self.wait_timeout,
+            STILL_REST,
+            description.clone(),
+            pace(&mut self.observer, &self.session),
+        );
+        let _rested = self.retain_observation(&description, result)?;
+        self.emit(StoryEvent::Cue(StoryCue::Still { name }))
     }
 
     pub fn capture(&self) -> Result<Frame> {
@@ -718,7 +807,20 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         }))
     }
 
+    /// Announce a pointer-bearing gesture's destination, then close on it as
+    /// the observer's approach asks.
     fn aim(
+        &mut self,
+        target: Option<&str>,
+        pointer: (i16, i16),
+        anchor: Option<&Anchor>,
+    ) -> Result<()> {
+        self.sight(target, pointer, anchor)?;
+        self.approach(pointer)
+    }
+
+    /// Announce a destination the gesture's own transport reaches.
+    fn sight(
         &mut self,
         target: Option<&str>,
         pointer: (i16, i16),
@@ -729,6 +831,33 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
             pointer: [pointer.0, pointer.1],
             anchor,
         }))
+    }
+
+    /// Glide the real pointer to `destination`, then dwell there, both paced.
+    fn approach(&mut self, destination: (i16, i16)) -> Result<()> {
+        let Approach { glide, dwell } = self.observer.approach();
+        if !glide.is_zero() && self.session.pointer()? != destination {
+            let steps = u16::try_from(glide.as_millis() / GLIDE_STEP.as_millis())
+                .unwrap_or(u16::MAX)
+                .max(1);
+            let glide = Motion {
+                steps,
+                duration: glide,
+            };
+            let _glided =
+                self.paced(|session, rest| session.motion_paced(destination, glide, rest))?;
+        }
+        linger(&mut self.observer, &self.session, dwell)
+    }
+
+    /// Run one native gesture whose deliberate rests offer the observer the
+    /// surface, so a film keeps its clock through input pacing.
+    fn paced<T>(
+        &mut self,
+        gesture: impl FnOnce(&X11Session<'app, 'bed>, Rest<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let (observer, session) = (&mut self.observer, &self.session);
+        gesture(session, &mut |duration| linger(observer, session, duration))
     }
 
     fn emit(&mut self, event: StoryEvent<'_>) -> Result<()> {
@@ -754,7 +883,7 @@ impl<S: DeserializeOwned + 'static, O: StoryObserver> Choreography for Story<'_,
         Self::tempo(self, tempo)
     }
 
-    fn still(&mut self, name: &str) -> Result<()> {
+    fn still(&mut self, name: &ArtifactStem) -> Result<()> {
         Self::still(self, name)
     }
 }
@@ -786,7 +915,7 @@ impl<S: DeserializeOwned + 'static, O: StoryObserver> Reaction<'_, '_, '_, S, O>
         let description = format!("{}; await {}", self.description, condition.description());
         if self.budget.production().is_some() && !self.story.observer.permits_performance_verdicts()
         {
-            return Err(crate::Error::Unsupported {
+            return Err(Error::Unsupported {
                 capability: "story observation during performance adjudication",
                 detail: "recording or tracing would contaminate the production latency verdict"
                     .to_owned(),
@@ -810,8 +939,6 @@ impl<S: DeserializeOwned + 'static, O: StoryObserver> Reaction<'_, '_, '_, S, O>
     }
 }
 
-/// Admit a still only under a kebab-case artifact stem, before any observer
-/// can turn the name into a path.
 /// The between-polls step of a story wait: offer the observer the surface,
 /// then rest one poll interval.
 fn pace<'s, O: StoryObserver>(
@@ -824,19 +951,19 @@ fn pace<'s, O: StoryObserver>(
     }
 }
 
-pub(crate) fn still_cue(name: &str) -> Result<StoryEvent<'_>> {
-    let lawful = name.split('-').all(|segment| {
-        !segment.is_empty()
-            && segment
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    });
-    if lawful {
-        Ok(StoryEvent::Cue(StoryCue::Still { name }))
-    } else {
-        Err(crate::Error::Score {
-            detail: format!("still name `{name}` is not a kebab-case artifact stem"),
-        })
+/// Rest `duration`, offering the observer the surface every poll meanwhile.
+fn linger<O: StoryObserver>(
+    observer: &mut O,
+    session: &X11Session<'_, '_>,
+    duration: Duration,
+) -> Result<()> {
+    let end = Instant::now() + duration;
+    loop {
+        observer.awaiting(StorySurface { surface: session })?;
+        match end.checked_duration_since(Instant::now()) {
+            Some(left) if !left.is_zero() => thread::sleep(left.min(crate::probe::POLL)),
+            _ => return Ok(()),
+        }
     }
 }
 
@@ -845,7 +972,7 @@ pub fn demand(condition: bool, detail: impl Into<String>) -> Result<()> {
     if condition {
         Ok(())
     } else {
-        Err(crate::Error::Verdict {
+        Err(Error::Verdict {
             detail: detail.into(),
         })
     }

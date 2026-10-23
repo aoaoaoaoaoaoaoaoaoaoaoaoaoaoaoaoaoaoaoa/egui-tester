@@ -65,8 +65,8 @@ choreography engine. Attach `egui_demo::Recorder` before `Story::ready`, place
 editorial `chapter`, `hold`, and persistent `tempo` cues in the scenario, and
 call `Story::finish` after the verdict. Tempo scales automatic recorder beats,
 not explicit chapter or hold durations. Terminate the product, then call
-`Recorder::publish`; this keeps offline compression outside the live
-application lifecycle. The same scenario function must remain callable with
+`Recorder::publish`, which returns the film and trace paths; this keeps
+offline compression outside the live application lifecycle. The same scenario function must remain callable with
 `Silent`.
 Recording observers are rejected on production performance rails. The recorder
 samples continuously against its invariant film clock, through the story's
@@ -76,22 +76,30 @@ works; pace it with tempo and holds. Use
 into `EncodingProfile::Showpiece`. Independently, `Overlay::Diagnostic`, the
 default, marks targets, the pointer, actions, and chapter titles so a proof
 film shows what the story aimed at, while `Overlay::Presentation` paints only
-the X server's own pointer bitmap; there a chapter is a rest on the live
-surface, and its title stays in the trace.
+the X server's own pointer bitmap where the server presents it; there a
+chapter is a rest on the live surface, and its title stays in the trace. A
+recorder moves the real pointer: each aimed gesture glides there, then dwells,
+for one beat each.
 The latter records through a lossless RGB staging film before its slow final
 transcode, preserving real-time sampling under expensive compression.
 
-Stills follow the same law. A score names a still with `still` after the
-condition that makes the presented state worth publishing, never after a
-sleep; `egui_demo::Darkroom` develops it as a lossless PNG of the product
-window with nothing painted over it. When hover state must not reach a still,
-the desktop projection first withdraws the pointer with `Story::leave`. A product's showcase performs ordinary
-semantic acts against a specimen world: operator-owned data borrowed read-only
-or copied private, with host networking admitted only where the data itself
-lives. It names the product's portfolio still `frontispiece`. The acceptance
-executable exposes it as `--stills DIR`, through `egui_demo::Showcase::stills`,
-and `--film DIR`, through `Showcase::film`, which records the same take as a
-showpiece film with the presentation overlay.
+Stills follow the same law. A score names a still with `still` and a
+kebab-case `ArtifactStem` after the condition that makes the presented state
+worth publishing, never after a sleep. The desktop projection then waits for
+the presentation to rest, and `egui_demo::Darkroom` develops a lossless PNG of
+the product window with nothing painted over it. When hover state must not
+reach a still, the desktop projection first withdraws the pointer with
+`Story::leave`. A product's showcase performs ordinary semantic acts against a
+specimen world: operator-owned data borrowed read-only or copied private, with
+host networking admitted only where the data itself lives, cached beneath
+`egui_demo::specimen_cache`. It must name `ArtifactStem::FRONTISPIECE`;
+`Showcase::publish` refuses a take without it. A showcase presents in
+`Framing::PORTFOLIO`, 1440×920, unless `Showcase::framed` says otherwise:
+attaching it reframes the window, `Story::ready` waits for the first pass in
+that framing, and the darkroom refuses a still of any other size. The
+acceptance executable exposes the showcase as `--stills DIR`, through
+`egui_demo::Showcase::stills`, and `--film DIR`, through `Showcase::film`,
+which records the same take as a showpiece film with the presentation overlay.
 A showcase presents; it is no verdict and stays out of the default suite.
 
 An Android performance run attaches `AndroidPerfetto` to
@@ -99,6 +107,8 @@ An Android performance run attaches `AndroidPerfetto` to
 screenshot capture outside the measured interval. The sidecar JSONL gives
 semantic causal order; use device trace slices, not host timestamps, for
 Android wall-clock verdicts.
+`AndroidChoreography::with_observer` refuses an observer whose framing is not
+the device screen's, since a device screen cannot be reframed.
 Scenarios that require a canonical first-run specimen may expose an explicit
 destructive option backed by `AndroidDevice::clear_app_data`; preserving state
 remains the default, and clearing is never an implicit choreography prelude.

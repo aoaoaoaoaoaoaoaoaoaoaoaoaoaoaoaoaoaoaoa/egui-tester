@@ -58,8 +58,17 @@ Observer, bound to one launch of the application.
 **Take** is one or more Stories sharing one Observer across relaunches. A take
 yields at most one film and any number of stills.
 
-**Still** is one publishable frame a score names: the product's presented
-surface at the instant of its cue, with nothing painted over it.
+**Still** is one publishable frame a score names with an `ArtifactStem`: the
+product's presented surface once its witnessed presentation rests, in the
+take's Framing, with nothing painted over it.
+
+**Frontispiece** is the still named `frontispiece`, which leads a showcase:
+its product's portfolio image. A showcase take that names none publishes
+nothing.
+
+**Framing** is the pixel geometry a take presents: the product window's size,
+and so its film's and every still's. A desktop story imposes it when the
+observer attaches; a device screen must already hold it.
 
 **Playtest** is a Story performed on a physical device for evidence. It is
 not a Foundry law: acceptance stays the hermetic testbed proof.
@@ -68,10 +77,13 @@ not a Foundry law: acceptance stays the hermetic testbed proof.
 executable. It is not a product backdoor or substitute implementation.
 
 **Specimen** is operator-owned data admitted into a showcase, read-only or as a
-private copy. It never enters an acceptance verdict.
+private copy. It never enters an acceptance verdict. A product caches it
+beneath `egui_demo::specimen_cache`: `<product>-acceptance` in the XDG cache
+home.
 
 **Showcase** is a product's presentation take: a score performed against a
-specimen world, developing stills and optionally recording its film.
+specimen world, developing stills led by its frontispiece and optionally
+recording its film.
 
 **Borrow** is a live host path deliberately exposed read-only. It never means a
 writable mount, overlay, or redirection.
@@ -178,6 +190,16 @@ requested state is ready. Synchronize through a presented semantic predicate,
 then judge a bounded region with a tolerant feature or change predicate, or use
 an external effect. Production motion remains enabled during acceptance.
 
+A still's rest keeps that law. Before its cue, `Story::still` waits until no
+pass presented for 400 ms moved an anchor or changed the Observation, then
+publishes whatever the surface shows, ambient water included. It reads
+witnessed passes, never pixels, and it is an editorial guard, not a verdict.
+Neither pixels nor pass silence could serve: water presents a pass every
+100–250 ms on the testbed renderer, indefinitely. A presentation that never
+rests fails the story with its pass rate, the age of its last pass, the anchors
+that moved, and how often the state changed. Android's projection reads no
+witness, so its still cannot rest; its score settles first.
+
 A `Reaction` considers only frames newer than its prior cursor and with product
 timestamps after the gesture trigger. This is temporal eligibility, not proof
 of causation. The resulting frame is a synchronization fence for a subsequent
@@ -196,21 +218,28 @@ Projection executes native input and synchronization while emitting
 editorial intent: chapters, literal holds, persistent choreography tempo, and
 named stills.
 `StoryFact` carries resolved target geometry, dispatched input receipts, and
-matched observation identity. An Observer sees only a capture-only view of
-the product surface, its pixels and the display server's pointer bitmap, and
-gains no input or mutation authority.
+matched observation identity. Cues, facts, and events are exhaustive, and
+every projection answers `still`, so a new kind reaches each observer as a
+compile error; `Error` alone grows without breaking a match. An Observer sees
+only a capture-only view of the product surface, its pixels and the pointer
+the display server presents, and gains no input or mutation authority. It may
+declare a Framing and an `Approach`, which the desktop projection performs.
 
 Ordinary acceptance attaches `Silent`; film production attaches
 `egui_demo::Recorder`, and still production attaches `egui_demo::Darkroom`. All
 run the same scenario, so a recorded take remains an acceptance execution
 rather than an independently scheduled imitation. `egui_demo::Showcase` develops
-a take's stills and may record its film in the same execution. A film's
-`Overlay` decides its pixels, never its clock: the diagnostic overlay marks
-aimed targets, the pointer, dispatched actions, and chapter titles; the
-presentation overlay, which showcase films use, composites only the server's
-own pointer bitmap at the film's pointer, and its chapters are rests whose
-titles stay in the trace. One score's films therefore share frame indices
-under either overlay. `Story::leave` withdraws the pointer to the screen corner
+a take's stills and may record its film in the same execution. Before each
+gesture that jumps to its destination, the desktop projection closes the real
+pointer on it as the observer's `Approach` asks: a paced glide, then a dwell.
+`Silent` approaches instantly; a recorder asks one beat of each, so a film
+shows the pointer's real flight rather than a painted one. An overlay never
+changes the beat structure: the diagnostic overlay marks aimed targets, the
+pointer, dispatched actions, and chapter titles; the presentation overlay,
+which showcase films use, composites only the server's own pointer bitmap
+where the server presents it, and its chapters are rests whose titles stay in
+the trace. One score's films therefore share frame indices under either
+overlay. `Story::leave` withdraws the pointer to the screen corner
 farthest from the window and reports that departure point, in window
 coordinates, through the ordinary aimed and dispatched facts: a film glides
 the pointer out of frame, and a still carries no hover state. It is no
@@ -219,14 +248,19 @@ recorder samples the product continuously against an invariant output clock so
 ambient animation remains temporally honest between semantic events, even when
 a capture misses one tick. Each launch segment keeps one film clock from its
 first event to `Story::finish`. Every story wait offers its observer
-`StoryObserver::awaiting` between journal polls, so the film keeps sampling
-while the story waits on the product, and loading keeps its real duration. A
-take cuts only between segments, where no product surface exists. The showpiece rail keeps that live clock upstream of
-compression by staging lossless RGB and performing the expensive presentation
-transcode only after story execution and product teardown. `Story::finish`
-closes one launch's segment, so a take may continue through a relaunch; after
-the product terminates, `Recorder::publish` seals the capture and performs the
-offline artifact work.
+`StoryObserver::awaiting` between journal polls, and every deliberate rest of
+input pacing does the same, so the film keeps sampling while the story waits
+on the product or paces a gesture, and loading keeps its real duration. A tick
+due before a capture shows the previous capture, never a later one. A take
+cuts only between segments, where no product surface exists. The showpiece
+rail keeps that live clock upstream of compression by staging lossless RGB and
+performing the expensive presentation transcode only after story execution
+and product teardown. `Story::finish` closes one launch's segment, so a take
+may continue through a relaunch; after the product terminates,
+`Recorder::publish` seals the capture and performs the offline artifact work.
+Every artifact develops in a staging directory beside its destination and is
+renamed into place only on publication, so an abandoned take leaves nothing
+behind that passes for a finished one.
 Facts are serializable provenance, not executable commands. Deterministic
 replay remains a separate policy problem because targets may move and waits
 may resolve along different lawful paths.

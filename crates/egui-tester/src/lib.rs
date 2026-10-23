@@ -14,6 +14,7 @@ mod pixels;
 mod probe;
 mod service;
 mod story;
+mod take;
 mod testbed;
 mod timing;
 mod x11;
@@ -31,6 +32,7 @@ pub use story::{
     Choreography, Reaction, Silent, Story, StoryCue, StoryEvent, StoryFact, StoryObserver,
     StorySurface, StoryTempo, demand,
 };
+pub use take::{Approach, ArtifactStem, Cursor, CursorImage, Framing};
 pub use testbed::{Backend, Testbed, TestbedBuilder, WaylandConfig, X11Config};
 pub use timing::{ActionReceipt, ReactionBudget, ReactionEndpoint, Timed};
-pub use x11::{Window, WindowQuery, X11Controller, X11CursorImage, X11Session};
+pub use x11::{Window, WindowQuery, X11Controller, X11Session};

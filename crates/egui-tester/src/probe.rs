@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::{ActionReceipt, Application, Error, ReactionBudget, Result, Timed, error::io};
 
 /// Interval between reads of a sealed journal while a wait is unsatisfied.
-const POLL: Duration = Duration::from_millis(8);
+pub(crate) const POLL: Duration = Duration::from_millis(8);
 
 /// One sealed observation from the standard semantic journal.
 #[derive(Clone, Debug, Deserialize)]
@@ -379,6 +379,52 @@ impl<S: DeserializeOwned> Probe<S> {
         }
     }
 
+    /// Wait until the witnessed presentation rests for `quiet`: across every
+    /// pass presented meanwhile, no anchor moved, appeared, vanished, or
+    /// changed focus, and the product state held. Passes that change neither,
+    /// such as ambient water, do not disturb the rest.
+    pub(crate) fn wait_rest_paced(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+        quiet: Duration,
+        description: impl Into<String>,
+        mut pace: impl FnMut() -> Result<()>,
+    ) -> Result<ProbeFrame<S>> {
+        let description = description.into();
+        let begun = Instant::now();
+        let mut unrest = Unrest::default();
+        let mut held = self.current::<Value>()?.map(|frame| (frame, begun));
+        loop {
+            app.ensure_running(&description)?;
+            self.refill()?;
+            while let Some(frame) = self.take_next::<Value>()? {
+                let since = match held.take() {
+                    Some((prior, since)) if !unrest.disturbed(&prior, &frame) => since,
+                    Some(_) => Instant::now(),
+                    None => begun,
+                };
+                held = Some((frame, since));
+            }
+            if let Some((_, since)) = &held
+                && since.elapsed() >= quiet
+            {
+                return self.current()?.ok_or_else(|| Error::Probe {
+                    path: self.path.clone(),
+                    detail: "the resting observation vanished".to_owned(),
+                });
+            }
+            if begun.elapsed() >= timeout {
+                return Err(Error::Condition {
+                    waiting: description,
+                    timeout,
+                    last_mismatch: unrest.testimony(held.is_some(), begun.elapsed(), quiet),
+                });
+            }
+            pace()?;
+        }
+    }
+
     /// Await a post-trigger semantic cue and enforce its product timestamp.
     ///
     /// Eligibility proves temporal ordering, not causation. The witness is a
@@ -487,7 +533,7 @@ impl<S: DeserializeOwned> Probe<S> {
         }
     }
 
-    fn take_next(&mut self) -> Result<Option<ProbeFrame<S>>> {
+    fn take_next<T: DeserializeOwned>(&mut self) -> Result<Option<ProbeFrame<T>>> {
         let Some(bytes) = self.pending.pop_front() else {
             return Ok(None);
         };
@@ -508,14 +554,14 @@ impl<S: DeserializeOwned> Probe<S> {
         Ok(Some(frame))
     }
 
-    fn current(&self) -> Result<Option<ProbeFrame<S>>> {
+    fn current<T: DeserializeOwned>(&self) -> Result<Option<ProbeFrame<T>>> {
         self.current
             .as_deref()
             .map(|bytes| self.decode(bytes))
             .transpose()
     }
 
-    fn decode(&self, bytes: &[u8]) -> Result<ProbeFrame<S>> {
+    fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<ProbeFrame<T>> {
         let frame = serde_json::from_slice(bytes).map_err(|error| Error::Probe {
             path: self.path.clone(),
             detail: error.to_string(),
@@ -524,7 +570,7 @@ impl<S: DeserializeOwned> Probe<S> {
         Ok(frame)
     }
 
-    fn validate(&self, frame: &ProbeFrame<S>) -> Result<()> {
+    fn validate<T>(&self, frame: &ProbeFrame<T>) -> Result<()> {
         if frame.schema != egui_tester_witness::SCHEMA {
             return self.invalid(format!(
                 "expected schema {}, found {}",
@@ -701,6 +747,72 @@ impl<S: DeserializeOwned> LegacyProbe<S> {
     }
 }
 
+/// What kept a presentation from resting: the passes it presented and what
+/// they changed.
+#[derive(Default)]
+struct Unrest {
+    passes: u32,
+    last_presented_ns: u64,
+    restated: u32,
+    moved: BTreeSet<TargetName>,
+}
+
+impl Unrest {
+    /// Count `frame`; whether it disturbed the presentation `prior` held.
+    fn disturbed(&mut self, prior: &ProbeFrame<Value>, frame: &ProbeFrame<Value>) -> bool {
+        self.passes = self.passes.saturating_add(1);
+        self.last_presented_ns = frame.surface_presented_ns;
+        let moved = frame
+            .anchors
+            .iter()
+            .filter(|anchor| prior.anchor(anchor.name.as_str()) != Some(*anchor))
+            .chain(
+                prior
+                    .anchors
+                    .iter()
+                    .filter(|anchor| frame.anchor(anchor.name.as_str()).is_none()),
+            )
+            .map(|anchor| anchor.name.clone())
+            .collect::<Vec<_>>();
+        let restated = prior.state != frame.state;
+        self.restated = self.restated.saturating_add(u32::from(restated));
+        let disturbed = restated || !moved.is_empty();
+        self.moved.extend(moved);
+        disturbed
+    }
+
+    fn testimony(&self, presented: bool, elapsed: Duration, quiet: Duration) -> String {
+        if !presented {
+            return format!("no pass presented within {elapsed:.1?}");
+        }
+        if self.restated == 0 && self.moved.is_empty() {
+            return format!("nothing moved, but the bound is shorter than the {quiet:?} rest");
+        }
+        let age = Duration::from_nanos(
+            egui_tester_witness::monotonic_ns().saturating_sub(self.last_presented_ns),
+        );
+        let rate = f64::from(self.passes) / elapsed.as_secs_f64();
+        let mut moved = self
+            .moved
+            .iter()
+            .take(6)
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>();
+        if self.moved.len() > moved.len() {
+            moved.push(format!("{} more", self.moved.len() - moved.len()));
+        }
+        let moved = if moved.is_empty() {
+            "no anchor moved".to_owned()
+        } else {
+            format!("anchors moved: {}", moved.join(", "))
+        };
+        format!(
+            "no {quiet:?} passed without change: {} passes in {elapsed:.1?} ({rate:.1}/s), the last {age:.0?} ago; {} changed the state; {moved}",
+            self.passes, self.restated
+        )
+    }
+}
+
 /// Rest one poll interval between journal reads: the pace of a wait no story
 /// observer shares.
 #[expect(
@@ -714,11 +826,7 @@ pub(crate) fn rest() -> Result<()> {
 
 /// Refuse a lookup no witness can satisfy: an off-grammar Target name.
 fn admit(name: &str) -> Result<()> {
-    TargetName::new(name)
-        .map(drop)
-        .map_err(|error| Error::Score {
-            detail: error.to_string(),
-        })
+    TargetName::new(name).map(drop).map_err(Error::from)
 }
 
 fn validate_anchors(path: &Path, anchors: &[Anchor]) -> Result<()> {
@@ -796,7 +904,7 @@ mod tests {
         ]);
         assert_eq!(
             probe
-                .take_next()
+                .take_next::<Value>()
                 .expect("first observation")
                 .expect("first frame")
                 .surface_sequence,
@@ -804,14 +912,14 @@ mod tests {
         );
         assert_eq!(
             probe
-                .take_next()
+                .take_next::<Value>()
                 .expect("same product frame may be presented again")
                 .expect("second frame")
                 .surface_sequence,
             2
         );
         assert!(
-            probe.take_next().is_err(),
+            probe.take_next::<Value>().is_err(),
             "surface identity regression was admitted"
         );
     }

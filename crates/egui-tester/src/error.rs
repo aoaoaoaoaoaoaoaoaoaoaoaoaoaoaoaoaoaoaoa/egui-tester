@@ -1,7 +1,10 @@
 use std::{io, path::PathBuf, time::Duration};
 
-/// Harness failure.
+use crate::Framing;
+
+/// Harness failure. New failure modes arrive without breaking a match.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("required containment or display tool `{0}` is unavailable")]
     MissingTool(&'static str),
@@ -79,6 +82,16 @@ pub enum Error {
     Unsupported {
         capability: &'static str,
         detail: String,
+    },
+    #[error("film broke its invariant: {detail}")]
+    Film { detail: String },
+    #[error("witness law refused: {0}")]
+    Witness(#[from] egui_tester_witness::Error),
+    #[error("surface is {width}×{height}, but the take is framed at {framing}")]
+    Framing {
+        framing: Framing,
+        width: u32,
+        height: u32,
     },
 }
 

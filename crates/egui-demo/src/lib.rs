@@ -3,12 +3,16 @@
 //! Ordinary acceptance stories remain the source of truth. Attaching a
 //! [`Recorder`] turns the same causal event stream into an H.264 film and a
 //! JSONL execution trace, painted with a diagnostic or presentation
-//! [`Overlay`]; a [`Darkroom`] develops every still the score names.
-//! Neither grants any new product authority, and both may share one take.
+//! [`Overlay`]; a [`Darkroom`] develops every still the score names, and a
+//! [`Showcase`] joins both in one take. None grants any new product authority.
+//! Every artifact develops in a staging directory beside its destination and
+//! reaches its final path only when published, so an abandoned take leaves
+//! nothing that passes for a finished one.
 
 mod overlay;
 
 use std::{
+    env,
     fs::{self, File},
     io::{BufWriter, ErrorKind, Write as _},
     num::NonZeroU32,
@@ -19,10 +23,11 @@ use std::{
 };
 
 use egui_tester::{
-    Anchor, Error, Frame, Result, StoryCue, StoryEvent, StoryFact, StoryObserver, StorySurface,
-    StoryTempo, demand,
+    Approach, ArtifactStem, Error, Frame, Framing, Result, StoryCue, StoryEvent, StoryFact,
+    StoryObserver, StorySurface, StoryTempo,
 };
 use serde::Serialize;
+use tempfile::TempDir;
 
 pub use overlay::Overlay;
 use overlay::{Canvas, Paint, Point, Rect, Scene};
@@ -100,129 +105,118 @@ impl RecorderConfig {
 /// Synchronous story observer producing a film and its typed execution trace.
 pub struct Recorder {
     config: RecorderConfig,
-    trace_path: PathBuf,
-    trace: BufWriter<File>,
+    /// Declared before the staging directory, so an abandoned take reaps its
+    /// encoder before the directory and its partial artifacts vanish.
     encoder: Option<Encoder>,
+    trace: BufWriter<File>,
+    /// The staged trace, for diagnostics.
+    trace_path: PathBuf,
+    staging: TempDir,
     scratch: Vec<u8>,
     clock: Option<FilmClock>,
     capture_cost: Duration,
+    /// The previous capture: every tick due before the next capture began
+    /// shows it, never a later one.
+    last: Option<(Frame, Paint)>,
+    /// The pointer the story last declared, for a projection presenting none.
     pointer: Option<Point>,
+    /// Whether an aim awaits its action, and the target it outlines.
+    aiming: bool,
     target: Option<Rect>,
     tempo: StoryTempo,
     begun: Instant,
     frames_written: u64,
-    sealed: bool,
 }
 
 impl Recorder {
+    /// Stage a film for `config`'s output and its trace beside it; neither
+    /// reaches its final path before [`Self::publish`].
     pub fn forge(config: RecorderConfig) -> Result<Self> {
-        demand(
-            config
-                .output
-                .extension()
-                .is_some_and(|extension| extension == "mp4"),
-            format!(
+        if config
+            .output
+            .extension()
+            .is_none_or(|extension| extension != "mp4")
+        {
+            return Err(film_fault(format!(
                 "egui-demo output must be an .mp4 file: {}",
                 config.output.display()
-            ),
-        )?;
-        if let Some(parent) = config.output.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|source| io("create demo artifact directory", parent, source))?;
+            )));
         }
-        let trace_path = config.output.with_extension("events.jsonl");
+        let staging = stage(parent(&config.output))?;
+        let trace_path = staged(&staging, &trace_path(&config.output));
         let trace = File::create(&trace_path)
             .map(BufWriter::new)
             .map_err(|source| io("create story event trace", &trace_path, source))?;
         Ok(Self {
             config,
-            trace_path,
-            trace,
             encoder: None,
+            trace,
+            trace_path,
+            staging,
             scratch: Vec::new(),
             clock: None,
             capture_cost: Duration::ZERO,
+            last: None,
             pointer: None,
+            aiming: false,
             target: None,
             tempo: StoryTempo::STANDARD,
             begun: Instant::now(),
             frames_written: 0,
-            sealed: false,
         })
     }
 
-    #[must_use]
-    pub fn output(&self) -> &Path {
-        &self.config.output
-    }
-
-    #[must_use]
-    pub fn trace_path(&self) -> &Path {
-        &self.trace_path
-    }
-
-    #[must_use]
-    pub const fn frames_written(&self) -> u64 {
-        self.frames_written
-    }
-
-    /// Seal the take and publish its film. Call this after terminating the
-    /// product: a take may span relaunches, and an offline showpiece transcode
-    /// must not contend with an idle live app.
-    pub fn publish(mut self) -> Result<Self> {
-        self.seal()?;
+    /// Seal the take and publish its film, then its trace, returning both
+    /// paths. Call this after terminating the product: a take may span
+    /// relaunches, and an offline showpiece transcode must not contend with an
+    /// idle live app.
+    pub fn publish(mut self) -> Result<Vec<PathBuf>> {
+        self.trace
+            .flush()
+            .map_err(|source| io("flush story event trace", &self.trace_path, source))?;
         self.encoder
-            .as_mut()
-            .ok_or_else(|| Error::Verdict {
-                detail: "egui-demo encoder vanished before publication".to_owned(),
-            })?
+            .take()
+            .ok_or_else(|| film_fault("story emitted no recordable surface frames"))?
             .publish()?;
-        Ok(self)
-    }
-
-    fn aim(
-        &mut self,
-        surface: StorySurface<'_>,
-        pointer: [i16; 2],
-        anchor: Option<&Anchor>,
-    ) -> Result<()> {
-        let destination = Point::from(pointer);
-        let origin = self.pointer.unwrap_or(destination);
-        let target = anchor.map(|anchor| Rect::from(anchor.rect));
-        self.target = target;
-        self.live_interval(surface, self.beat(TARGET_FLIGHT), |progress| Scene::Aim {
-            pointer: origin.lerp(destination, progress),
-            target,
-        })?;
-        self.pointer = Some(destination);
-        self.live_interval(surface, self.beat(TARGET_REST), |_| Scene::Aim {
-            pointer: destination,
-            target,
-        })
+        let film = self.config.output.clone();
+        let trace = trace_path(&film);
+        promote(&staged(&self.staging, &film), &film)?;
+        promote(&self.trace_path, &trace)?;
+        Ok(vec![film, trace])
     }
 
     fn strike(&mut self, surface: StorySurface<'_>, pointer: Option<[i16; 2]>) -> Result<()> {
         if let Some(pointer) = pointer {
             self.pointer = Some(Point::from(pointer));
         }
-        let (pointer, target) = (self.pointer, self.target);
+        self.aiming = false;
+        let target = self.target.take();
         self.live_interval(surface, self.beat(ACTION_REST), |progress| Scene::Strike {
-            pointer,
             target,
             progress,
         })
     }
 
     fn rest(&mut self, surface: StorySurface<'_>, duration: Duration) -> Result<()> {
-        let pointer = self.pointer;
-        self.live_interval(surface, duration, |_| Scene::Rest { pointer })
+        let scene = self.idle();
+        self.live_interval(surface, duration, |_| scene)
     }
 
     /// A chapter rests on the surface for the same span under every overlay;
     /// only the diagnostic overlay paints its title.
     fn chapter(&mut self, surface: StorySurface<'_>, title: &str) -> Result<()> {
-        let pointer = self.pointer;
-        self.live_interval(surface, CHAPTER_REST, |_| Scene::Chapter { title, pointer })
+        self.live_interval(surface, CHAPTER_REST, |_| Scene::Chapter { title })
+    }
+
+    /// The scene of a story between acts: closing on an aim, or at rest.
+    const fn idle(&self) -> Scene<'static> {
+        if self.aiming {
+            Scene::Aim {
+                target: self.target,
+            }
+        } else {
+            Scene::Rest
+        }
     }
 
     fn beat(&self, duration: Duration) -> Duration {
@@ -266,21 +260,24 @@ impl Recorder {
             .get_or_insert_with(|| FilmClock::start(Instant::now(), base))
     }
 
-    /// Fill the ticks that fell due since the last sample with the story at
-    /// rest: the film's share of time the story spent waiting or acting.
+    /// Fill the ticks that fell due since the last sample with the story
+    /// between acts: the film's share of time the story spent waiting or
+    /// pacing its input.
     fn catch_up(&mut self, surface: StorySurface<'_>) -> Result<()> {
         let fps = self.config.frames_per_second;
         match self.clock {
             Some(clock) if clock.next_tick(fps) <= Instant::now() => {
-                let pointer = self.pointer;
-                self.sample(surface, |_| Scene::Rest { pointer })
+                let scene = self.idle();
+                self.sample(surface, |_| scene)
             }
             _ => Ok(()),
         }
     }
 
-    /// Write every film tick due by now from one fresh capture; the freshest
-    /// product frame fills every tick that elapsed since the last.
+    /// Write every film tick due by now from one fresh capture. Ticks due
+    /// before the capture began show the previous capture, never a later one;
+    /// a segment's first capture alone fills the ticks before it, since no
+    /// earlier surface exists.
     fn sample<'a>(
         &mut self,
         surface: StorySurface<'_>,
@@ -288,14 +285,23 @@ impl Recorder {
     ) -> Result<()> {
         let fps = self.config.frames_per_second;
         let captured = Instant::now();
-        let frame = surface.capture()?;
-        let paint = self.config.overlay.bind(surface)?;
+        let fresh = (
+            surface.capture()?,
+            self.config.overlay.bind(surface, self.pointer)?,
+        );
         self.capture_cost = captured.elapsed();
         let clock = *self.segment();
         let due = clock.due(Instant::now(), fps);
+        let last = self.last.take();
         for index in clock.ticks..due {
-            self.write_scene(&frame, &paint, scene(clock.tick(index, fps)))?;
+            let at = clock.tick(index, fps);
+            let (frame, paint) = match &last {
+                Some(prior) if at < captured => prior,
+                _ => &fresh,
+            };
+            self.write_scene(frame, paint, scene(at))?;
         }
+        self.last = Some(fresh);
         self.clock = Some(FilmClock {
             ticks: clock.ticks.max(due),
             ..clock
@@ -311,7 +317,7 @@ impl Recorder {
         let encoder = match &mut self.encoder {
             Some(encoder) => encoder,
             vacant @ None => vacant.insert(Encoder::ignite(
-                &self.config.output,
+                &staged(&self.staging, &self.config.output),
                 width,
                 height,
                 self.config.frames_per_second,
@@ -338,30 +344,15 @@ impl Recorder {
             film_frame,
             event,
         };
-        serde_json::to_writer(&mut self.trace, &record).map_err(|source| Error::Verdict {
-            detail: format!(
+        serde_json::to_writer(&mut self.trace, &record).map_err(|source| {
+            film_fault(format!(
                 "serialize story event trace {}: {source}",
                 self.trace_path.display()
-            ),
+            ))
         })?;
         self.trace
             .write_all(b"\n")
             .map_err(|source| io("append story event trace", &self.trace_path, source))
-    }
-
-    fn seal(&mut self) -> Result<()> {
-        if self.sealed {
-            return Ok(());
-        }
-        self.trace
-            .flush()
-            .map_err(|source| io("flush story event trace", &self.trace_path, source))?;
-        let encoder = self.encoder.as_mut().ok_or_else(|| Error::Verdict {
-            detail: "story emitted no recordable surface frames".to_owned(),
-        })?;
-        encoder.seal()?;
-        self.sealed = true;
-        Ok(())
     }
 }
 
@@ -384,7 +375,12 @@ impl StoryObserver for Recorder {
             | StoryEvent::Fact(StoryFact::TargetResolved { .. }) => Ok(()),
             StoryEvent::Fact(StoryFact::PointerAimed {
                 pointer, anchor, ..
-            }) => self.aim(surface, pointer, anchor),
+            }) => {
+                self.pointer = Some(Point::from(pointer));
+                self.aiming = true;
+                self.target = anchor.map(|anchor| Rect::from(anchor.rect));
+                Ok(())
+            }
             StoryEvent::Fact(StoryFact::ActionDispatched { pointer, .. }) => {
                 self.strike(surface, pointer)
             }
@@ -394,7 +390,8 @@ impl StoryObserver for Recorder {
         }
     }
 
-    /// Sample whatever ticks fell due while the story waits on the product.
+    /// Sample whatever ticks fell due while the story waits on the product
+    /// or paces its input.
     fn awaiting(&mut self, surface: StorySurface<'_>) -> Result<()> {
         self.catch_up(surface)
     }
@@ -404,9 +401,19 @@ impl StoryObserver for Recorder {
     fn finish(&mut self, surface: StorySurface<'_>) -> Result<()> {
         self.catch_up(surface)?;
         self.clock = None;
+        self.last = None;
         self.trace
             .flush()
             .map_err(|source| io("flush story event trace", &self.trace_path, source))
+    }
+
+    /// The real pointer glides to each destination for one beat, then rests
+    /// on it for another, so a film shows the approach a viewer would.
+    fn approach(&self) -> Approach {
+        Approach {
+            glide: self.beat(TARGET_FLIGHT),
+            dwell: self.beat(TARGET_REST),
+        }
     }
 }
 
@@ -466,45 +473,48 @@ fn progress(begun: Instant, duration: Duration, at: Instant) -> f64 {
     (at.saturating_duration_since(begun).as_secs_f64() / duration.as_secs_f64()).min(1.0)
 }
 
-impl Drop for Recorder {
-    fn drop(&mut self) {
-        if self.sealed {
-            return;
-        }
-        let _flushed = self.trace.flush();
-        drop(self.encoder.take());
-    }
-}
-
 /// Story observer developing every still a score names into a lossless PNG.
 ///
-/// A still is the product's own presented surface at the instant of its cue;
-/// nothing is painted over it. One darkroom may span every launch of a take.
+/// A still is the product's own presented surface at the instant of its cue,
+/// in the darkroom's framing; nothing is painted over it. One darkroom may
+/// span every launch of a take.
 pub struct Darkroom {
     directory: PathBuf,
-    developed: Vec<PathBuf>,
+    framing: Framing,
+    staging: TempDir,
+    developed: Vec<ArtifactStem>,
 }
 
 impl Darkroom {
-    /// Develop each still as `<directory>/<name>.png`, replacing an earlier take's.
-    pub fn forge(directory: impl Into<PathBuf>) -> Result<Self> {
+    /// Develop each still in `framing`, to be published as
+    /// `<directory>/<name>.png` over an earlier take's.
+    pub fn forge(directory: impl Into<PathBuf>, framing: Framing) -> Result<Self> {
         let directory = directory.into();
-        fs::create_dir_all(&directory)
-            .map_err(|source| io("create still directory", &directory, source))?;
+        let staging = stage(&directory)?;
         Ok(Self {
             directory,
+            framing,
+            staging,
             developed: Vec::new(),
         })
     }
 
-    /// Every developed still in score order, refusing a take that named none.
+    /// Publish every developed still in score order, refusing a take that
+    /// named none.
     pub fn publish(self) -> Result<Vec<PathBuf>> {
         if self.developed.is_empty() {
             return Err(Error::Score {
                 detail: format!("take named no stills for {}", self.directory.display()),
             });
         }
-        Ok(self.developed)
+        self.developed
+            .iter()
+            .map(|name| {
+                let still = self.directory.join(format!("{name}.png"));
+                promote(&staged(&self.staging, &still), &still)?;
+                Ok(still)
+            })
+            .collect()
     }
 }
 
@@ -513,20 +523,33 @@ impl StoryObserver for Darkroom {
         let StoryEvent::Cue(StoryCue::Still { name }) = event else {
             return Ok(());
         };
-        let still = self.directory.join(format!("{name}.png"));
-        if self.developed.contains(&still) {
+        if self.developed.contains(name) {
             return Err(Error::Score {
                 detail: format!("take named the still `{name}` twice"),
             });
         }
-        surface.capture()?.save_png(&still)?;
-        self.developed.push(still);
+        let frame = surface.capture()?;
+        let (width, height) = (frame.width(), frame.height());
+        if !self.framing.frames(width, height) {
+            return Err(Error::Framing {
+                framing: self.framing,
+                width,
+                height,
+            });
+        }
+        frame.save_png(self.staging.path().join(format!("{name}.png")))?;
+        self.developed.push(name.clone());
         Ok(())
+    }
+
+    fn framing(&self) -> Option<Framing> {
+        Some(self.framing)
     }
 }
 
-/// Observer for one showcase take: every still its score names and, when
-/// asked, the take's showpiece film.
+/// Observer for one showcase take: every still its score names, led by its
+/// [`ArtifactStem::FRONTISPIECE`], and, when asked, the take's showpiece film,
+/// all in one framing, by default [`Framing::PORTFOLIO`].
 pub struct Showcase {
     recorder: Option<Recorder>,
     darkroom: Darkroom,
@@ -537,14 +560,14 @@ impl Showcase {
     pub fn stills(directory: impl Into<PathBuf>) -> Result<Self> {
         Ok(Self {
             recorder: None,
-            darkroom: Darkroom::forge(directory)?,
+            darkroom: Darkroom::forge(directory, Framing::PORTFOLIO)?,
         })
     }
 
     /// Also record the take as the showpiece `<directory>/<film>.mp4`, bearing
     /// only the display server's own pointer over the product.
-    pub fn film(directory: impl Into<PathBuf>, film: &str) -> Result<Self> {
-        let darkroom = Darkroom::forge(directory)?;
+    pub fn film(directory: impl Into<PathBuf>, film: &ArtifactStem) -> Result<Self> {
+        let darkroom = Darkroom::forge(directory, Framing::PORTFOLIO)?;
         let recorder = Recorder::forge(
             RecorderConfig::new(darkroom.directory.join(format!("{film}.mp4")))
                 .overlay(Overlay::Presentation)
@@ -556,19 +579,34 @@ impl Showcase {
         })
     }
 
-    /// Publish every artifact of the take, film first, after the product
-    /// terminates. A filmed take may name no stills; a stills-only take that
-    /// named none published nothing and is refused.
+    /// Present the take in `framing` instead.
+    #[must_use]
+    pub fn framed(mut self, framing: Framing) -> Self {
+        self.darkroom.framing = framing;
+        self
+    }
+
+    /// Publish the take after the product terminates: its film and trace
+    /// first, then every still in score order. A take whose score named no
+    /// frontispiece publishes nothing.
     pub fn publish(self) -> Result<Vec<PathBuf>> {
-        let Some(recorder) = self.recorder else {
-            return self.darkroom.publish();
+        if !self
+            .darkroom
+            .developed
+            .contains(&ArtifactStem::FRONTISPIECE)
+        {
+            return Err(Error::Score {
+                detail: format!(
+                    "showcase take named no `{}` still",
+                    ArtifactStem::FRONTISPIECE
+                ),
+            });
+        }
+        let mut artifacts = match self.recorder {
+            Some(recorder) => recorder.publish()?,
+            None => Vec::new(),
         };
-        let recorder = recorder.publish()?;
-        let mut artifacts = vec![
-            recorder.output().to_owned(),
-            recorder.trace_path().to_owned(),
-        ];
-        artifacts.extend(self.darkroom.developed);
+        artifacts.extend(self.darkroom.publish()?);
         Ok(artifacts)
     }
 }
@@ -594,6 +632,36 @@ impl StoryObserver for Showcase {
             None => Ok(()),
         }
     }
+
+    fn framing(&self) -> Option<Framing> {
+        Some(self.darkroom.framing)
+    }
+
+    fn approach(&self) -> Approach {
+        self.recorder
+            .as_ref()
+            .map_or(Approach::INSTANT, StoryObserver::approach)
+    }
+}
+
+/// The cache directory beneath which a product's showcase keeps its specimen:
+/// `<product>-acceptance` in the XDG cache home, an absolute `XDG_CACHE_HOME`
+/// or else `$HOME/.cache`. It is resolved, never created; `product` must be a
+/// kebab-case [`ArtifactStem`].
+pub fn specimen_cache(product: &str) -> Result<PathBuf> {
+    let product = ArtifactStem::new(product)?;
+    let absolute = |name| {
+        env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let home = absolute("XDG_CACHE_HOME")
+        .or_else(|| absolute("HOME").map(|home| home.join(".cache")))
+        .ok_or_else(|| Error::Unsupported {
+            capability: "specimen cache",
+            detail: "neither XDG_CACHE_HOME nor HOME is an absolute path".to_owned(),
+        })?;
+    Ok(home.join(format!("{product}-acceptance")))
 }
 
 #[derive(Serialize)]
@@ -604,17 +672,18 @@ struct TraceRecord<'a> {
     event: StoryEvent<'a>,
 }
 
+/// One ffmpeg encoder writing a staged film, through a staged lossless
+/// capture for a showpiece.
 struct Encoder {
     output: PathBuf,
     capture: PathBuf,
     encoding_profile: EncodingProfile,
+    /// The running encoder, until publication reaps it.
     child: Option<Child>,
     input: Option<ChildStdin>,
     width: u32,
     height: u32,
     frame_bytes: usize,
-    capture_sealed: bool,
-    published: bool,
 }
 
 impl Encoder {
@@ -637,7 +706,7 @@ impl Encoder {
             "-hide_banner",
             "-loglevel",
             "error",
-            "-y",
+            "-n",
             "-f",
             "rawvideo",
             "-pixel_format",
@@ -693,9 +762,10 @@ impl Encoder {
                 io("spawn egui-demo encoder", output, source)
             }
         })?;
-        let input = child.stdin.take().ok_or_else(|| Error::Verdict {
-            detail: "ffmpeg did not expose its raw-video input".to_owned(),
-        })?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| film_fault("ffmpeg did not expose its raw-video input"))?;
         let frame_bytes = usize::try_from(width)
             .ok()
             .and_then(|width| {
@@ -704,10 +774,10 @@ impl Encoder {
                     .and_then(|height| width.checked_mul(height))
             })
             .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| Error::Verdict {
-                detail: format!(
+            .ok_or_else(|| {
+                film_fault(format!(
                     "egui-demo frame geometry {width}x{height} exceeds platform limits"
-                ),
+                ))
             })?;
         Ok(Self {
             output: output.to_owned(),
@@ -718,71 +788,51 @@ impl Encoder {
             width,
             height,
             frame_bytes,
-            capture_sealed: false,
-            published: false,
         })
     }
 
     fn write(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
-        demand(
-            (width, height) == (self.width, self.height),
-            format!(
+        if (width, height) != (self.width, self.height) {
+            return Err(film_fault(format!(
                 "egui-demo frame geometry changed from {}x{} to {width}x{height}",
                 self.width, self.height
-            ),
-        )?;
-        demand(
-            rgba.len() == self.frame_bytes,
-            format!(
+            )));
+        }
+        if rgba.len() != self.frame_bytes {
+            return Err(film_fault(format!(
                 "egui-demo frame has {} RGBA bytes, expected {}",
                 rgba.len(),
                 self.frame_bytes
-            ),
-        )?;
+            )));
+        }
         self.input
             .as_mut()
-            .ok_or_else(|| Error::Verdict {
-                detail: "egui-demo film was written after encoder closure".to_owned(),
-            })?
+            .ok_or_else(|| film_fault("egui-demo film was written after encoder closure"))?
             .write_all(rgba)
             .map_err(|source| io("write egui-demo frame", &self.output, source))
     }
 
-    fn seal(&mut self) -> Result<()> {
-        if self.capture_sealed {
-            return Ok(());
-        }
+    /// Seal the capture and, for a showpiece, transcode the staged film from it.
+    fn publish(mut self) -> Result<()> {
         drop(self.input.take());
-        let child = self.child.take().ok_or_else(|| Error::Verdict {
-            detail: "egui-demo encoder process vanished before closure".to_owned(),
-        })?;
+        let child = self
+            .child
+            .take()
+            .ok_or_else(|| film_fault("egui-demo encoder process vanished before closure"))?;
         let output = child
             .wait_with_output()
             .map_err(|source| io("wait for egui-demo encoder", &self.output, source))?;
-        self.capture_sealed = true;
         demand_command(output, format!("ffmpeg -> {}", self.capture.display()))?;
-        if !self.encoding_profile.stages_lossless_capture() {
-            self.published = true;
+        if self.encoding_profile.stages_lossless_capture() {
+            self.transcode_showpiece()?;
         }
-        Ok(())
-    }
-
-    fn publish(&mut self) -> Result<()> {
-        self.seal()?;
-        if self.published {
-            return Ok(());
-        }
-        self.transcode_showpiece()?;
-        fs::remove_file(&self.capture)
-            .map_err(|source| io("remove lossless egui-demo capture", &self.capture, source))?;
-        self.published = true;
         Ok(())
     }
 
     fn transcode_showpiece(&self) -> Result<()> {
         let (preset, crf, tune) = self.encoding_profile.x264();
         let mut command = Command::new("ffmpeg");
-        let _command = command.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]);
+        let _command = command.args(["-hide_banner", "-loglevel", "error", "-n", "-i"]);
         let _capture = command.arg(&self.capture);
         let _command = command.args([
             "-an",
@@ -814,16 +864,53 @@ impl Encoder {
 }
 
 impl Drop for Encoder {
+    /// Kill an encoder abandoned mid-take; its staging directory discards
+    /// whatever it wrote.
     fn drop(&mut self) {
-        if !self.capture_sealed {
-            drop(self.input.take());
-            if let Some(mut child) = self.child.take() {
-                let _status = child.wait();
-            }
+        drop(self.input.take());
+        if let Some(mut child) = self.child.take() {
+            let _killed = child.kill();
+            let _status = child.wait();
         }
-        if self.encoding_profile.stages_lossless_capture() && !self.published {
-            let _removed = fs::remove_file(&self.capture);
-        }
+    }
+}
+
+/// The trace published beside `film`.
+fn trace_path(film: &Path) -> PathBuf {
+    film.with_extension("events.jsonl")
+}
+
+/// The directory holding `path`, the working directory for a bare name.
+fn parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Create `directory` and a staging directory inside it, on the filesystem
+/// every artifact published there will occupy.
+fn stage(directory: &Path) -> Result<TempDir> {
+    fs::create_dir_all(directory)
+        .map_err(|source| io("create artifact directory", directory, source))?;
+    tempfile::Builder::new()
+        .prefix(".egui-demo-")
+        .tempdir_in(directory)
+        .map_err(|source| io("create artifact staging directory", directory, source))
+}
+
+/// Where `path` develops inside `staging`.
+fn staged(staging: &TempDir, path: &Path) -> PathBuf {
+    staging.path().join(path.file_name().unwrap_or_default())
+}
+
+/// Move a staged artifact onto its final path, replacing an earlier take's.
+fn promote(staged: &Path, path: &Path) -> Result<()> {
+    fs::rename(staged, path).map_err(|source| io("publish artifact", path, source))
+}
+
+fn film_fault(detail: impl Into<String>) -> Error {
+    Error::Film {
+        detail: detail.into(),
     }
 }
 

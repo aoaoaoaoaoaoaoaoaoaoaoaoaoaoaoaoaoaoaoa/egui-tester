@@ -2,54 +2,59 @@
 
 use std::num::NonZeroUsize;
 
-use egui_tester::{Result, StorySurface, X11CursorImage};
+use egui_tester::{CursorImage, Result, StorySurface};
 use font8x8::{BASIC_FONTS, UnicodeFonts as _};
 
 /// What a film paints over the product's presented surface.
 ///
-/// An overlay decides pixels, never time: beats, chapters, and holds keep one
-/// film clock under either overlay, so a take's trace indexes either film
-/// frame for frame.
+/// An overlay never changes the beat structure: beats, chapters, holds, and
+/// approaches take the same film time under either overlay, so a take's trace
+/// indexes either film frame for frame.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Overlay {
-    /// Proof marks: the aimed target's outline, rings at the film's pointer,
-    /// a ripple per dispatched action, and a title card per chapter.
+    /// Proof marks: the aimed target's outline, rings at the pointer, a ripple
+    /// per dispatched action, and a title card per chapter.
     #[default]
     Diagnostic,
-    /// Only the display server's own pointer bitmap, hotspot-aligned at the
-    /// film's pointer, as a viewer of the screen would see it. A chapter is a
-    /// rest on the live surface; its title remains in the trace.
+    /// Only the display server's own pointer bitmap, hotspot-aligned where the
+    /// server presents it, as a viewer of the screen would see it. A chapter
+    /// is a rest on the live surface; its title remains in the trace.
     Presentation,
 }
 
 impl Overlay {
-    /// Bind this overlay to one capture instant of `surface`.
-    pub(crate) fn bind(self, surface: StorySurface<'_>) -> Result<Paint> {
-        Ok(match self {
-            Self::Diagnostic => Paint::Marks,
-            Self::Presentation => surface.cursor()?.map_or(Paint::Bare, Paint::Cursor),
+    /// Bind this overlay to one capture instant of `surface`: its presented
+    /// pointer, else the pointer the story last `declared` on a projection
+    /// that presents none.
+    pub(crate) fn bind(self, surface: StorySurface<'_>, declared: Option<Point>) -> Result<Paint> {
+        let (pointer, image) = match surface.cursor()? {
+            Some(cursor) => (Some(Point::from(cursor.position)), Some(cursor.image)),
+            None => (declared, None),
+        };
+        Ok(Paint {
+            overlay: self,
+            pointer,
+            image,
         })
     }
 }
 
 /// An overlay bound to one capture instant.
-pub(crate) enum Paint {
-    Marks,
-    Cursor(X11CursorImage),
-    /// Presentation on a projection that presents no pointer.
-    Bare,
+pub(crate) struct Paint {
+    overlay: Overlay,
+    pointer: Option<Point>,
+    /// The presented pointer's bitmap, absent where none is presented.
+    image: Option<CursorImage>,
 }
 
 impl Paint {
     pub(crate) fn apply(&self, mut canvas: Canvas<'_>, scene: Scene<'_>) {
-        match self {
-            Self::Marks => canvas.mark(scene),
-            Self::Cursor(cursor) => {
-                if let Some(pointer) = scene.pointer() {
-                    canvas.composite(cursor, pointer);
-                }
+        match (self.overlay, &self.image, self.pointer) {
+            (Overlay::Diagnostic, _, pointer) => canvas.mark(scene, pointer),
+            (Overlay::Presentation, Some(image), Some(pointer)) => {
+                canvas.composite(image, pointer);
             }
-            Self::Bare => {}
+            (Overlay::Presentation, ..) => {}
         }
     }
 }
@@ -57,51 +62,25 @@ impl Paint {
 /// One film tick's choreographic moment.
 #[derive(Clone, Copy)]
 pub(crate) enum Scene<'a> {
-    /// The pointer approaches, then rests on, the aimed target.
+    /// The pointer closes on an aimed destination, outlined when a target.
     Aim {
-        pointer: Point,
         target: Option<Rect>,
     },
     /// An action was dispatched; `progress` runs through its beat from 0 to 1.
     Strike {
-        pointer: Option<Point>,
         target: Option<Rect>,
         progress: f64,
     },
-    Rest {
-        pointer: Option<Point>,
-    },
+    Rest,
     Chapter {
         title: &'a str,
-        pointer: Option<Point>,
     },
-}
-
-impl Scene<'_> {
-    const fn pointer(self) -> Option<Point> {
-        match self {
-            Self::Aim { pointer, .. } => Some(pointer),
-            Self::Strike { pointer, .. }
-            | Self::Rest { pointer }
-            | Self::Chapter { pointer, .. } => pointer,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct Point {
     x: i32,
     y: i32,
-}
-
-impl Point {
-    pub(crate) fn lerp(self, other: Self, progress: f64) -> Self {
-        let towards = |from: i32, to: i32| from + (f64::from(to - from) * progress).round() as i32;
-        Self {
-            x: towards(self.x, other.x),
-            y: towards(self.y, other.y),
-        }
-    }
 }
 
 impl From<[i16; 2]> for Point {
@@ -148,20 +127,18 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    fn mark(&mut self, scene: Scene<'_>) {
+    fn mark(&mut self, scene: Scene<'_>, pointer: Option<Point>) {
         match scene {
-            Scene::Aim { pointer, target } => {
+            Scene::Aim { target } => {
                 if let Some(target) = target {
                     self.outline(target, [35, 211, 255, 210], 2);
                 }
-                self.ring(pointer, 8, 11, [255, 255, 255, 230]);
-                self.ring(pointer, 11, 14, [20, 170, 220, 210]);
+                if let Some(pointer) = pointer {
+                    self.ring(pointer, 8, 11, [255, 255, 255, 230]);
+                    self.ring(pointer, 11, 14, [20, 170, 220, 210]);
+                }
             }
-            Scene::Strike {
-                pointer,
-                target,
-                progress,
-            } => {
+            Scene::Strike { target, progress } => {
                 if let Some(target) = target {
                     self.outline(target, [35, 211, 255, 180], 2);
                 }
@@ -170,19 +147,19 @@ impl<'a> Canvas<'a> {
                     self.ring(pointer, radius, radius + 3, [255, 206, 75, 230]);
                 }
             }
-            Scene::Rest { pointer } => {
+            Scene::Rest => {
                 if let Some(pointer) = pointer {
                     self.ring(pointer, 5, 8, [35, 211, 255, 150]);
                 }
             }
-            Scene::Chapter { title, .. } => self.chapter_card(title),
+            Scene::Chapter { title } => self.chapter_card(title),
         }
     }
 
     /// Lay the server's cursor over the frame with its hotspot on `pointer`.
     /// The X server premultiplies the bitmap's color by its alpha, so the source
     /// adds to the veiled destination rather than blending with it.
-    fn composite(&mut self, cursor: &X11CursorImage, pointer: Point) {
+    fn composite(&mut self, cursor: &CursorImage, pointer: Point) {
         let Some(width) = NonZeroUsize::new(usize::from(cursor.width)) else {
             return;
         };

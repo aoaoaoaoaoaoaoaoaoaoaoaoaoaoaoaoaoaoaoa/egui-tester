@@ -127,12 +127,15 @@ animation-tuned compression for presentation artifacts. Showpiece capture is
 first sealed into a lossless RGB staging film, then transcoded offline; final
 compression therefore cannot throttle or distort the live story clock. End
 the story, terminate the product, then call `Recorder::publish` so the offline
-transcode never competes with an idle renderer.
+transcode never competes with an idle renderer. Film and trace develop in a
+staging directory and reach their paths only then; an abandoned take leaves
+neither behind.
 
 `Overlay::Diagnostic`, the default, marks aimed targets, the pointer, dispatched
 actions, and chapter titles. `Overlay::Presentation`, used by
-`Showcase::film`, composites only the X server's own pointer bitmap. An
-overlay changes pixels, never the film clock.
+`Showcase::film`, composites only the X server's own pointer bitmap where the
+server presents it. A recorder glides the real pointer to each aimed target,
+so a film shows its real flight. An overlay never changes the beat structure.
 
 Recording is barred from production latency adjudication because synchronous
 capture changes wall time. The trace records what one execution did; it is not

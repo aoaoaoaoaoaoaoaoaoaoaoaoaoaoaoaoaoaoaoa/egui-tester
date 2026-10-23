@@ -17,13 +17,62 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
-use crate::{Error, Result};
+use crate::{Error, Framing, Result};
 
-use super::{Window as Client, X11Controller};
+use super::{Window as Client, X11Controller, X11Session};
 
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(2);
 
+impl X11Session<'_, '_> {
+    /// Impose `framing` on the bound window.
+    pub(crate) fn frame(&self, framing: Framing) -> Result<()> {
+        self.controller.frame(&self.window, framing)
+    }
+
+    /// The bound window's size in pixels.
+    pub(crate) fn geometry(&self) -> Result<[u32; 2]> {
+        self.controller.geometry(&self.window)
+    }
+}
+
 impl X11Controller {
+    /// Impose `framing` on the client. No window manager mediates, so the
+    /// server moves it to the screen origin and resizes it at once; the client
+    /// learns of it as of any resize.
+    pub(crate) fn frame(&self, window: &Client, framing: Framing) -> Result<()> {
+        let screen = &self.connection.setup().roots[self.screen];
+        if framing.width() > screen.width_in_pixels || framing.height() > screen.height_in_pixels {
+            return Err(Error::Unsupported {
+                capability: "take framing",
+                detail: format!(
+                    "{framing} exceeds the {}×{} testbed screen",
+                    screen.width_in_pixels, screen.height_in_pixels
+                ),
+            });
+        }
+        let geometry = ConfigureWindowAux::new()
+            .x(0)
+            .y(0)
+            .width(u32::from(framing.width()))
+            .height(u32::from(framing.height()));
+        self.connection
+            .configure_window(window.id, &geometry)
+            .map_err(|error| fault("frame window", error))?
+            .check()
+            .map_err(|error| fault("frame window", error))
+    }
+
+    /// The client's size in pixels.
+    pub(crate) fn geometry(&self, window: &Client) -> Result<[u32; 2]> {
+        let geometry = self
+            .connection
+            .get_geometry(window.id)
+            .map_err(|error| fault("query window geometry", error))?
+            .reply()
+            .map_err(|error| fault("query window geometry", error))?;
+        Ok([geometry.width, geometry.height].map(u32::from))
+    }
+
     /// Move the pointer to a screen coordinate outside the client window.
     pub fn leave(&self, window: &Client) -> Result<()> {
         self.depart(window, self.departure(window)?)
