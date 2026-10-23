@@ -68,6 +68,17 @@ into `EncodingProfile::Showpiece`.
 The latter records through a lossless RGB staging film before its slow final
 transcode, preserving real-time sampling under expensive compression.
 
+Stills follow the same law. A score names a still with `still` after the
+condition that makes the presented state worth publishing, never after a
+sleep; `egui_demo::Darkroom` develops it as a lossless PNG of the product
+window with nothing painted over it. A product's showcase performs ordinary
+semantic acts against a specimen world: operator-owned data borrowed read-only
+or copied private, with host networking admitted only where the data itself
+lives. It names the product's portfolio still `frontispiece`. The acceptance
+executable exposes it as `--stills DIR`, through `egui_demo::Showcase::stills`,
+and `--film DIR`, through `Showcase::film`, which records the same take.
+A showcase presents; it is no verdict and stays out of the default suite.
+
 An Android performance run attaches `AndroidPerfetto` to
 `AndroidChoreography`. Start profiling before the first score act and keep ADB
 screenshot capture outside the measured interval. The sidecar JSONL gives

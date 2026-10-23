@@ -44,6 +44,9 @@ pub enum Error {
     #[error("product verdict failed: {detail}")]
     Verdict { detail: String },
 
+    #[error("story score is malformed: {detail}")]
+    Score { detail: String },
+
     #[error("performance budget breached for {operation}: observed {elapsed:?}, budget {budget:?}")]
     TooSlow {
         operation: String,

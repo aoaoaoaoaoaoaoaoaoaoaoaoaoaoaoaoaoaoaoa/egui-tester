@@ -47,12 +47,16 @@ impl Default for StoryTempo {
 }
 
 /// Authored editorial instruction carried by a live story stream.
+///
+/// A `Still` names the presented surface at that instant as one publishable
+/// still: a kebab-case artifact stem, unique within one take.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(tag = "cue", rename_all = "snake_case")]
 pub enum StoryCue<'a> {
     Chapter { title: &'a str },
     Hold { duration: Duration },
     Tempo { tempo: StoryTempo },
+    Still { name: &'a str },
 }
 
 /// Immutable execution fact emitted while a story drives the product.
@@ -128,6 +132,8 @@ impl StorySurface<'_> {
 pub trait StoryObserver {
     fn observe(&mut self, event: StoryEvent<'_>, surface: StorySurface<'_>) -> Result<()>;
 
+    /// Close one launch's segment of a take. The observer may continue the
+    /// take through a relaunched story, so this must not seal it.
     fn finish(&mut self, _surface: StorySurface<'_>) -> Result<()> {
         Ok(())
     }
@@ -150,6 +156,9 @@ pub trait Choreography {
     fn hold(&mut self, duration: Duration) -> Result<()>;
 
     fn tempo(&mut self, tempo: StoryTempo) -> Result<()>;
+
+    /// Name the presented surface at this instant as one publishable still.
+    fn still(&mut self, name: &str) -> Result<()>;
 }
 
 /// Inert default observer used by ordinary acceptance stories.
@@ -594,11 +603,17 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         self.emit(StoryEvent::Cue(StoryCue::Tempo { tempo }))
     }
 
+    /// Offer observers the presented surface as the publishable still `name`.
+    pub fn still(&mut self, name: &str) -> Result<()> {
+        self.emit(still_cue(name)?)
+    }
+
     pub fn capture(&self) -> Result<Frame> {
         self.session.capture()
     }
 
-    /// Seal the observer and return it to the caller.
+    /// Close this launch's segment and return the observer, which may carry
+    /// the same take into a relaunched story.
     pub fn finish(mut self) -> Result<O> {
         self.observer.finish(StorySurface {
             surface: &self.session,
@@ -700,6 +715,10 @@ impl<S: DeserializeOwned + 'static, O: StoryObserver> Choreography for Story<'_,
     fn tempo(&mut self, tempo: StoryTempo) -> Result<()> {
         Self::tempo(self, tempo)
     }
+
+    fn still(&mut self, name: &str) -> Result<()> {
+        Self::still(self, name)
+    }
 }
 
 /// One injected gesture awaiting a temporally eligible semantic cue.
@@ -749,6 +768,24 @@ impl<S: DeserializeOwned + 'static, O: StoryObserver> Reaction<'_, '_, '_, S, O>
 
     pub fn next_frame(&mut self) -> Result<Timed<ProbeFrame<S>>> {
         self.until(Condition::new("a fresh surface-presented frame", |_| true))
+    }
+}
+
+/// Admit a still only under a kebab-case artifact stem, before any observer
+/// can turn the name into a path.
+pub(crate) fn still_cue(name: &str) -> Result<StoryEvent<'_>> {
+    let lawful = name.split('-').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    });
+    if lawful {
+        Ok(StoryEvent::Cue(StoryCue::Still { name }))
+    } else {
+        Err(crate::Error::Score {
+            detail: format!("still name `{name}` is not a kebab-case artifact stem"),
+        })
     }
 }
 

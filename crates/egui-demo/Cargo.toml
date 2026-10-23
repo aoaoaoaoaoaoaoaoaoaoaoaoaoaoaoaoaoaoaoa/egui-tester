@@ -1,6 +1,6 @@
 [package]
 name = "egui-demo"
-description = "Optional film and trace observer for egui-tester stories"
+description = "Optional film, still, and trace observers for egui-tester stories"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

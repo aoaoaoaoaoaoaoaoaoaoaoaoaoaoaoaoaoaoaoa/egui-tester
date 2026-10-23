@@ -11,7 +11,8 @@ use serde::Serialize;
 
 use crate::{
     ActionReceipt, Choreography, Error, Frame, Result, Silent, StoryCue, StoryEvent, StoryFact,
-    StoryObserver, StorySurface, StoryTempo, story::CaptureSurface,
+    StoryObserver, StorySurface, StoryTempo,
+    story::{CaptureSurface, still_cue},
 };
 
 const DRIVER: &str = "moe.swarm.eguitester.driver/moe.swarm.eguitester.driver.Driver";
@@ -270,6 +271,10 @@ impl<O: StoryObserver> AndroidChoreography<'_, O> {
         self.emit(StoryEvent::Cue(StoryCue::Tempo { tempo }))
     }
 
+    pub fn still(&mut self, name: &str) -> Result<()> {
+        self.emit(still_cue(name)?)
+    }
+
     pub fn capture(&self) -> Result<Frame> {
         self.session.capture()
     }
@@ -427,6 +432,10 @@ impl<O: StoryObserver> Choreography for AndroidChoreography<'_, O> {
 
     fn tempo(&mut self, tempo: StoryTempo) -> Result<()> {
         Self::tempo(self, tempo)
+    }
+
+    fn still(&mut self, name: &str) -> Result<()> {
+        Self::still(self, name)
     }
 }
 

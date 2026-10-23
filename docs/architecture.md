@@ -49,13 +49,25 @@ input, synchronization, and verdict machinery.
 may retain evidence but has no product-mutation authority.
 
 **Story** is one effectful execution of Choreography through a Projection and
-Observer.
+Observer, bound to one launch of the application.
+
+**Take** is one or more Stories sharing one Observer across relaunches. A take
+yields at most one film and any number of stills.
+
+**Still** is one publishable frame a score names: the product's presented
+surface at the instant of its cue, with nothing painted over it.
 
 **Playtest** is a Story performed on a physical device for evidence. It is
 not a Foundry law: acceptance stays the hermetic testbed proof.
 
 **Fixture** is deterministic input and environment owned by the acceptance
 executable. It is not a product backdoor or substitute implementation.
+
+**Specimen** is operator-owned data admitted into a showcase, read-only or as a
+private copy. It never enters an acceptance verdict.
+
+**Showcase** is a product's presentation take: a score performed against a
+specimen world, developing stills and optionally recording its film.
 
 **Borrow** is a live host path deliberately exposed read-only. It never means a
 writable mount, overlay, or redirection.
@@ -174,20 +186,25 @@ Choreography is deliberately not an eager action vector or persisted replay.
 The product score calls semantic acts through a product-owned trait. A
 Projection executes native input and synchronization while emitting
 `StoryEvent` items synchronously in causal order. `StoryCue` carries authored
-editorial intent: chapters, literal holds, and persistent choreography tempo.
+editorial intent: chapters, literal holds, persistent choreography tempo, and
+named stills.
 `StoryFact` carries resolved target geometry, dispatched input receipts, and
 matched observation identity. An Observer sees only a capture-capable view of
 the product surface and gains no mutation authority.
 
 Ordinary acceptance attaches `Silent`; film production attaches
-`egui_demo::Recorder`. Both run the same scenario, so a recorded take remains
-an acceptance execution rather than an independently scheduled imitation. The
+`egui_demo::Recorder`, and still production attaches `egui_demo::Darkroom`. All
+run the same scenario, so a recorded take remains an acceptance execution
+rather than an independently scheduled imitation. `egui_demo::Showcase` develops
+a take's stills and may record its film in the same execution. The
 recorder samples the product continuously against an invariant output clock so
 ambient animation remains temporally honest between semantic events, even when
 a capture misses one tick. The showpiece rail keeps that live clock upstream of
 compression by staging lossless RGB and performing the expensive presentation
 transcode only after story execution and product teardown. `Story::finish`
-seals live capture; `Recorder::publish` owns only offline artifact work.
+closes one launch's segment, so a take may continue through a relaunch; after
+the product terminates, `Recorder::publish` seals the capture and performs the
+offline artifact work.
 Facts are serializable provenance, not executable commands. Deterministic
 replay remains a separate policy problem because targets may move and waits
 may resolve along different lawful paths.

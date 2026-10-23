@@ -1,8 +1,9 @@
-//! Optional film and trace observer for [`egui_tester::Story`].
+//! Optional film, still, and trace observers for [`egui_tester::Story`].
 //!
 //! Ordinary acceptance stories remain the source of truth. Attaching a
 //! [`Recorder`] turns the same causal event stream into an H.264 film and a
-//! JSONL execution trace without granting any new product authority.
+//! JSONL execution trace; a [`Darkroom`] develops every still the score names.
+//! Neither grants any new product authority, and both may share one take.
 
 use std::{
     fs::{self, File},
@@ -21,7 +22,7 @@ use egui_tester::{
 use font8x8::{BASIC_FONTS, UnicodeFonts as _};
 use serde::Serialize;
 
-const TRACE_SCHEMA: &str = "egui-demo.trace/3";
+const TRACE_SCHEMA: &str = "egui-demo.trace/4";
 const TARGET_FLIGHT: Duration = Duration::from_millis(220);
 const TARGET_REST: Duration = Duration::from_millis(100);
 const ACTION_REST: Duration = Duration::from_millis(160);
@@ -145,8 +146,9 @@ impl Recorder {
         self.frames_written
     }
 
-    /// Publish the sealed capture. Call this after terminating the product so
-    /// an offline showpiece transcode cannot contend with an idle live app.
+    /// Seal the take and publish its film. Call this after terminating the
+    /// product: a take may span relaunches, and an offline showpiece transcode
+    /// must not contend with an idle live app.
     pub fn publish(mut self) -> Result<Self> {
         self.seal()?;
         self.encoder
@@ -328,7 +330,8 @@ impl StoryObserver for Recorder {
                 self.tempo = tempo;
                 Ok(())
             }
-            StoryEvent::Fact(StoryFact::TargetResolved { .. }) => Ok(()),
+            StoryEvent::Cue(StoryCue::Still { .. })
+            | StoryEvent::Fact(StoryFact::TargetResolved { .. }) => Ok(()),
             StoryEvent::Fact(StoryFact::PointerAimed {
                 pointer, anchor, ..
             }) => self.aim(surface, pointer, anchor),
@@ -339,8 +342,12 @@ impl StoryObserver for Recorder {
         }
     }
 
+    /// Close one launch's segment. The take stays open for a relaunch until
+    /// [`Recorder::publish`] seals it.
     fn finish(&mut self, _surface: StorySurface<'_>) -> Result<()> {
-        self.seal()
+        self.trace
+            .flush()
+            .map_err(|source| io("flush story event trace", &self.trace_path, source))
     }
 }
 
@@ -351,6 +358,118 @@ impl Drop for Recorder {
         }
         let _flushed = self.trace.flush();
         drop(self.encoder.take());
+    }
+}
+
+/// Story observer developing every still a score names into a lossless PNG.
+///
+/// A still is the product's own presented surface at the instant of its cue;
+/// nothing is painted over it. One darkroom may span every launch of a take.
+pub struct Darkroom {
+    directory: PathBuf,
+    developed: Vec<PathBuf>,
+}
+
+impl Darkroom {
+    /// Develop each still as `<directory>/<name>.png`, replacing an earlier take's.
+    pub fn forge(directory: impl Into<PathBuf>) -> Result<Self> {
+        let directory = directory.into();
+        fs::create_dir_all(&directory)
+            .map_err(|source| io("create still directory", &directory, source))?;
+        Ok(Self {
+            directory,
+            developed: Vec::new(),
+        })
+    }
+
+    /// Every developed still in score order, refusing a take that named none.
+    pub fn publish(self) -> Result<Vec<PathBuf>> {
+        if self.developed.is_empty() {
+            return Err(Error::Score {
+                detail: format!("take named no stills for {}", self.directory.display()),
+            });
+        }
+        Ok(self.developed)
+    }
+}
+
+impl StoryObserver for Darkroom {
+    fn observe(&mut self, event: StoryEvent<'_>, surface: StorySurface<'_>) -> Result<()> {
+        let StoryEvent::Cue(StoryCue::Still { name }) = event else {
+            return Ok(());
+        };
+        let still = self.directory.join(format!("{name}.png"));
+        if self.developed.contains(&still) {
+            return Err(Error::Score {
+                detail: format!("take named the still `{name}` twice"),
+            });
+        }
+        surface.capture()?.save_png(&still)?;
+        self.developed.push(still);
+        Ok(())
+    }
+}
+
+/// Observer for one showcase take: every still its score names and, when
+/// asked, the take's showpiece film.
+pub struct Showcase {
+    recorder: Option<Recorder>,
+    darkroom: Darkroom,
+}
+
+impl Showcase {
+    /// Develop the take's stills into `directory`.
+    pub fn stills(directory: impl Into<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            recorder: None,
+            darkroom: Darkroom::forge(directory)?,
+        })
+    }
+
+    /// Also record the take as the showpiece `<directory>/<film>.mp4`.
+    pub fn film(directory: impl Into<PathBuf>, film: &str) -> Result<Self> {
+        let darkroom = Darkroom::forge(directory)?;
+        let recorder = Recorder::forge(
+            RecorderConfig::new(darkroom.directory.join(format!("{film}.mp4")))
+                .encoding_profile(EncodingProfile::Showpiece),
+        )?;
+        Ok(Self {
+            recorder: Some(recorder),
+            darkroom,
+        })
+    }
+
+    /// Publish every artifact of the take, film first, after the product
+    /// terminates.
+    pub fn publish(self) -> Result<Vec<PathBuf>> {
+        let mut artifacts = match self.recorder {
+            Some(recorder) => {
+                let recorder = recorder.publish()?;
+                vec![
+                    recorder.output().to_owned(),
+                    recorder.trace_path().to_owned(),
+                ]
+            }
+            None => Vec::new(),
+        };
+        artifacts.extend(self.darkroom.publish()?);
+        Ok(artifacts)
+    }
+}
+
+impl StoryObserver for Showcase {
+    fn observe(&mut self, event: StoryEvent<'_>, surface: StorySurface<'_>) -> Result<()> {
+        if let Some(recorder) = &mut self.recorder {
+            recorder.observe(event, surface)?;
+        }
+        self.darkroom.observe(event, surface)
+    }
+
+    fn finish(&mut self, surface: StorySurface<'_>) -> Result<()> {
+        match &mut self.recorder {
+            Some(recorder) => recorder.finish(surface),
+            None => Ok(()),
+        }
     }
 }
 

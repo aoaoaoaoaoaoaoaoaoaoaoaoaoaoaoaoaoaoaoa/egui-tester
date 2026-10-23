@@ -24,8 +24,8 @@ X11 is the complete, release-tested vertical:
 - launch-sealed semantic and frame journals through `egui-tester-witness`;
 - typed `Story<S>`, composable `Condition<S>`, and gesture `Reaction`
   porcelain;
-- a serializable live story stream whose optional consumers include films and
-  execution traces;
+- a serializable live story stream whose optional consumers include films,
+  stills, and execution traces;
 - separate functional deadlines, reaction latency contracts, and sustained
   cadence contracts;
 - curated logs, private outputs, captures, and diagnostics on failure.
