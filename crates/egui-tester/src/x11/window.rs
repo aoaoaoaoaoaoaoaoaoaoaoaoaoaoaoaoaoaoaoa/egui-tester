@@ -28,11 +28,6 @@ impl X11Session<'_, '_> {
     pub(crate) fn frame(&self, framing: Framing) -> Result<()> {
         self.controller.frame(&self.window, framing)
     }
-
-    /// The bound window's size in pixels.
-    pub(crate) fn geometry(&self) -> Result<[u32; 2]> {
-        self.controller.geometry(&self.window)
-    }
 }
 
 impl X11Controller {
@@ -60,17 +55,6 @@ impl X11Controller {
             .map_err(|error| fault("frame window", error))?
             .check()
             .map_err(|error| fault("frame window", error))
-    }
-
-    /// The client's size in pixels.
-    pub(crate) fn geometry(&self, window: &Client) -> Result<[u32; 2]> {
-        let geometry = self
-            .connection
-            .get_geometry(window.id)
-            .map_err(|error| fault("query window geometry", error))?
-            .reply()
-            .map_err(|error| fault("query window geometry", error))?;
-        Ok([geometry.width, geometry.height].map(u32::from))
     }
 
     /// Move the pointer to a screen coordinate outside the client window.

@@ -7,9 +7,8 @@ use font8x8::{BASIC_FONTS, UnicodeFonts as _};
 
 /// What a film paints over the product's presented surface.
 ///
-/// An overlay never changes the beat structure: beats, chapters, holds, and
-/// approaches take the same film time under either overlay, so a take's trace
-/// indexes either film frame for frame.
+/// An overlay never changes the beat structure: beats, chapters, and holds
+/// take the same film time under either overlay.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Overlay {
     /// Proof marks: the aimed target's outline, rings at the pointer, a ripple

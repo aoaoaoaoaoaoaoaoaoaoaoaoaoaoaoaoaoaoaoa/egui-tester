@@ -145,6 +145,7 @@ pub struct PendingFrame<T> {
     anchors: Vec<Anchor>,
     state: T,
     astir: bool,
+    surface_size: Option<[u32; 2]>,
 }
 
 impl<T> PendingFrame<T> {
@@ -198,6 +199,7 @@ impl<T> PendingFrame<T> {
             anchors,
             state,
             astir: false,
+            surface_size: None,
         })
     }
 
@@ -209,6 +211,16 @@ impl<T> PendingFrame<T> {
     #[must_use]
     pub const fn astir(mut self, astir: bool) -> Self {
         self.astir = astir;
+        self
+    }
+
+    /// Declare the physical size of the surface this pass laid out for and
+    /// presented, as the egui integration's `surface_size` reports it. A
+    /// framed take waits for a pass at its framing's size; a host that
+    /// declares none leaves the framing unverified.
+    #[must_use]
+    pub const fn surface_size(mut self, size: [u32; 2]) -> Self {
+        self.surface_size = Some(size);
         self
     }
 
@@ -449,6 +461,7 @@ impl Writer {
             anchors: &pending.anchors,
             state: &pending.state,
             astir: pending.astir,
+            surface_size: pending.surface_size,
         };
         let bytes = serde_json::to_vec(&wire)?;
         append_observation(&mut self.observations, &self.path, &bytes)?;
@@ -523,6 +536,8 @@ struct WireFrame<'a, T> {
     /// nothing.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     astir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    surface_size: Option<[u32; 2]>,
 }
 
 /// Incremental reader for the canonical semantic observation journal.
@@ -1045,85 +1060,7 @@ fn invalid_journal<T>(path: &Path, detail: impl Into<String>) -> Result<T> {
 }
 
 #[cfg(feature = "egui")]
-pub mod egui {
-    use super::{Anchor, Result};
-    use egui::{Context, Id, Rect, Response, Ui, plugin::Plugin};
-
-    const STORE: &str = "egui-tester-witness-anchors";
-
-    #[derive(Clone, Default)]
-    struct Anchors(Vec<(String, Rect, bool)>);
-
-    #[derive(Default)]
-    struct AnchorPass;
-
-    impl Plugin for AnchorPass {
-        fn debug_name(&self) -> &'static str {
-            "egui-tester witness anchors"
-        }
-
-        fn on_begin_pass(&mut self, ui: &mut Ui) {
-            reset(ui.ctx());
-        }
-    }
-
-    /// Install final-pass anchor collection into an egui context.
-    ///
-    /// Installation is idempotent. Targets from passes invalidated by
-    /// [`Context::request_discard`] are erased before the replacement pass.
-    pub fn install(ctx: &Context) {
-        ctx.add_plugin(AnchorPass);
-    }
-
-    fn reset(ctx: &Context) {
-        ctx.data_mut(|data| {
-            let _prior = data.remove_temp::<Anchors>(Id::new(STORE));
-        });
-    }
-
-    /// Register a semantic target for the current egui pass. `name` must be a
-    /// [`TargetName`](crate::TargetName); [`take`] fails the pass otherwise.
-    pub fn record(ui: &Ui, name: impl Into<String>, rect: Rect) {
-        record_rect(ui.ctx(), name, rect);
-    }
-
-    /// Register one egui response, including whether it owns keyboard focus.
-    pub fn record_response(ui: &Ui, name: impl Into<String>, response: &Response) {
-        record_target(ui.ctx(), name, response.rect, response.has_focus());
-    }
-
-    /// Register a semantic target from painter-only code.
-    pub fn record_rect(ctx: &Context, name: impl Into<String>, rect: Rect) {
-        record_target(ctx, name, rect, false);
-    }
-
-    fn record_target(ctx: &Context, name: impl Into<String>, rect: Rect, focused: bool) {
-        ctx.data_mut(|data| {
-            data.get_temp_mut_or_default::<Anchors>(Id::new(STORE))
-                .0
-                .push((name.into(), rect, focused));
-        });
-    }
-
-    /// Consume the current pass's targets in physical-pixel coordinates,
-    /// refusing the pass if any recorded name is not a canonical
-    /// [`TargetName`](crate::TargetName).
-    pub fn take(ctx: &Context, pixels_per_point: f32) -> Result<Vec<Anchor>> {
-        ctx.data_mut(|data| data.remove_temp::<Anchors>(Id::new(STORE)))
-            .unwrap_or_default()
-            .0
-            .into_iter()
-            .map(|(name, rect, focused)| {
-                Anchor::logical(
-                    name,
-                    [rect.min.x, rect.min.y, rect.max.x, rect.max.y],
-                    pixels_per_point,
-                )
-                .map(|anchor| anchor.with_focus(focused))
-            })
-            .collect()
-    }
-}
+pub mod egui;
 
 #[cfg(test)]
 mod tests;

@@ -21,19 +21,12 @@ pub struct ArtifactStem(Cow<'static, str>);
 
 impl ArtifactStem {
     /// The still a showcase leads with: its product's portfolio image.
-    pub const FRONTISPIECE: Self = Self(Cow::Borrowed("frontispiece"));
+    pub const FRONTISPIECE: Self = Self::literal("frontispiece");
 
     /// Admit `stem` under the kebab-case law.
     pub fn new(stem: impl Into<String>) -> Result<Self> {
         let stem = stem.into();
-        let lawful = stem.len() <= STEM_LIMIT
-            && stem.split('-').all(|segment| {
-                !segment.is_empty()
-                    && segment
-                        .bytes()
-                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-            });
-        if lawful {
+        if lawful(stem.as_bytes()) {
             Ok(Self(Cow::Owned(stem)))
         } else {
             Err(Error::Score {
@@ -44,10 +37,41 @@ impl ArtifactStem {
         }
     }
 
+    /// Admit a literal `stem` in a const item, where an unlawful one fails
+    /// compilation. Evaluated at run time it panics instead, so admit runtime
+    /// text with [`Self::new`].
+    #[must_use]
+    pub const fn literal(stem: &'static str) -> Self {
+        assert!(
+            lawful(stem.as_bytes()),
+            "not a kebab-case artifact stem of at most 64 bytes"
+        );
+        Self(Cow::Borrowed(stem))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// The kebab-case law: nonempty hyphen-joined segments of lowercase ASCII
+/// letters and digits, at most [`STEM_LIMIT`] bytes in all.
+const fn lawful(stem: &[u8]) -> bool {
+    if stem.is_empty() || stem.len() > STEM_LIMIT {
+        return false;
+    }
+    let mut index = 0;
+    let mut opening = true;
+    while index < stem.len() {
+        match stem[index] {
+            b'-' if !opening => opening = true,
+            b'a'..=b'z' | b'0'..=b'9' => opening = false,
+            _ => return false,
+        }
+        index += 1;
+    }
+    !opening
 }
 
 impl fmt::Display for ArtifactStem {
@@ -97,10 +121,15 @@ impl fmt::Display for Framing {
     }
 }
 
+/// A nonzero pixel count for a const framing; zero fails compilation.
+#[expect(
+    clippy::panic,
+    reason = "evaluated only in const items, where a zero dimension fails compilation"
+)]
 const fn pixels(count: u16) -> NonZeroU16 {
     match NonZeroU16::new(count) {
         Some(count) => count,
-        None => NonZeroU16::MIN,
+        None => panic!("a framing dimension must be nonzero"),
     }
 }
 

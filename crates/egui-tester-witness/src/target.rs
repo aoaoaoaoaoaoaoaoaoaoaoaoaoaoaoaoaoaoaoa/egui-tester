@@ -30,6 +30,16 @@ impl TargetName {
         &self.0
     }
 
+    /// The semantic material before the first slash, owner and dotted path
+    /// together: what every name of one class shares, whatever identities
+    /// follow.
+    #[must_use]
+    pub fn semantic(&self) -> &str {
+        self.0
+            .split_once('/')
+            .map_or(self.as_str(), |(semantic, _)| semantic)
+    }
+
     /// Release the canonical wire spelling.
     #[must_use]
     pub fn into_string(self) -> String {

@@ -38,6 +38,9 @@ const TARGET_REST: Duration = Duration::from_millis(100);
 const ACTION_REST: Duration = Duration::from_millis(160);
 const OBSERVATION_REST: Duration = Duration::from_millis(220);
 const CHAPTER_REST: Duration = Duration::from_millis(1_500);
+/// Name prefix of every staging directory, and the lock file inside each.
+const STAGING_PREFIX: &str = ".egui-demo-";
+const STAGING_LOCK: &str = ".lock";
 
 /// Immutable policy for one story film: destination, clock, overlay, and
 /// encoding.
@@ -111,7 +114,7 @@ pub struct Recorder {
     trace: BufWriter<File>,
     /// The staged trace, for diagnostics.
     trace_path: PathBuf,
-    staging: TempDir,
+    staging: Staging,
     scratch: Vec<u8>,
     clock: Option<FilmClock>,
     capture_cost: Duration,
@@ -406,13 +409,24 @@ impl StoryObserver for Recorder {
             .flush()
             .map_err(|source| io("flush story event trace", &self.trace_path, source))
     }
+}
 
-    /// The real pointer glides to each destination for one beat, then rests
-    /// on it for another, so a film shows the approach a viewer would.
-    fn approach(&self) -> Approach {
-        Approach {
-            glide: self.beat(TARGET_FLIGHT),
-            dwell: self.beat(TARGET_REST),
+impl Drop for Recorder {
+    /// A proof film dropped unpublished is a failed take's evidence: finalize
+    /// it with its trace beside its destination, under an `-abandoned` stem.
+    /// A showpiece dropped unpublished is discarded with its staging.
+    fn drop(&mut self) {
+        let Some(encoder) = self.encoder.take() else {
+            return;
+        };
+        if self.config.encoding_profile != EncodingProfile::Proof {
+            return;
+        }
+        let _flushed = self.trace.flush();
+        if encoder.publish().is_ok() {
+            let film = abandoned(&self.config.output);
+            let _film = promote(&staged(&self.staging, &self.config.output), &film);
+            let _trace = promote(&self.trace_path, &trace_path(&film));
         }
     }
 }
@@ -476,24 +490,22 @@ fn progress(begun: Instant, duration: Duration, at: Instant) -> f64 {
 /// Story observer developing every still a score names into a lossless PNG.
 ///
 /// A still is the product's own presented surface at the instant of its cue,
-/// in the darkroom's framing; nothing is painted over it. One darkroom may
-/// span every launch of a take.
+/// once the story has let the presentation rest; nothing is painted over it.
+/// One darkroom may span every launch of a take.
 pub struct Darkroom {
     directory: PathBuf,
-    framing: Framing,
-    staging: TempDir,
+    staging: Staging,
     developed: Vec<ArtifactStem>,
 }
 
 impl Darkroom {
-    /// Develop each still in `framing`, to be published as
-    /// `<directory>/<name>.png` over an earlier take's.
-    pub fn forge(directory: impl Into<PathBuf>, framing: Framing) -> Result<Self> {
+    /// Develop each still, to be published as `<directory>/<name>.png` over an
+    /// earlier take's.
+    pub fn forge(directory: impl Into<PathBuf>) -> Result<Self> {
         let directory = directory.into();
         let staging = stage(&directory)?;
         Ok(Self {
             directory,
-            framing,
             staging,
             developed: Vec::new(),
         })
@@ -528,31 +540,28 @@ impl StoryObserver for Darkroom {
                 detail: format!("take named the still `{name}` twice"),
             });
         }
-        let frame = surface.capture()?;
-        let (width, height) = (frame.width(), frame.height());
-        if !self.framing.frames(width, height) {
-            return Err(Error::Framing {
-                framing: self.framing,
-                width,
-                height,
-            });
-        }
-        frame.save_png(self.staging.path().join(format!("{name}.png")))?;
+        surface
+            .capture()?
+            .save_png(self.staging.path().join(format!("{name}.png")))?;
         self.developed.push(name.clone());
         Ok(())
     }
 
-    fn framing(&self) -> Option<Framing> {
-        Some(self.framing)
+    fn develops_stills(&self) -> bool {
+        true
     }
 }
 
 /// Observer for one showcase take: every still its score names, led by its
 /// [`ArtifactStem::FRONTISPIECE`], and, when asked, the take's showpiece film,
 /// all in one framing, by default [`Framing::PORTFOLIO`].
+///
+/// A showcase is a presentation, not an acceptance execution: it requests the
+/// framing and, when filmed, an approach that glides the real pointer.
 pub struct Showcase {
     recorder: Option<Recorder>,
     darkroom: Darkroom,
+    framing: Framing,
 }
 
 impl Showcase {
@@ -560,14 +569,15 @@ impl Showcase {
     pub fn stills(directory: impl Into<PathBuf>) -> Result<Self> {
         Ok(Self {
             recorder: None,
-            darkroom: Darkroom::forge(directory, Framing::PORTFOLIO)?,
+            darkroom: Darkroom::forge(directory)?,
+            framing: Framing::PORTFOLIO,
         })
     }
 
     /// Also record the take as the showpiece `<directory>/<film>.mp4`, bearing
     /// only the display server's own pointer over the product.
     pub fn film(directory: impl Into<PathBuf>, film: &ArtifactStem) -> Result<Self> {
-        let darkroom = Darkroom::forge(directory, Framing::PORTFOLIO)?;
+        let darkroom = Darkroom::forge(directory)?;
         let recorder = Recorder::forge(
             RecorderConfig::new(darkroom.directory.join(format!("{film}.mp4")))
                 .overlay(Overlay::Presentation)
@@ -576,13 +586,14 @@ impl Showcase {
         Ok(Self {
             recorder: Some(recorder),
             darkroom,
+            framing: Framing::PORTFOLIO,
         })
     }
 
     /// Present the take in `framing` instead.
     #[must_use]
     pub fn framed(mut self, framing: Framing) -> Self {
-        self.darkroom.framing = framing;
+        self.framing = framing;
         self
     }
 
@@ -634,22 +645,31 @@ impl StoryObserver for Showcase {
     }
 
     fn framing(&self) -> Option<Framing> {
-        Some(self.darkroom.framing)
+        Some(self.framing)
     }
 
+    /// A filmed showcase glides the real pointer to each destination for one
+    /// beat and dwells there for another, so its film shows the approach a
+    /// viewer would; a stills-only showcase jumps.
     fn approach(&self) -> Approach {
         self.recorder
             .as_ref()
-            .map_or(Approach::INSTANT, StoryObserver::approach)
+            .map_or(Approach::INSTANT, |recorder| Approach {
+                glide: recorder.beat(TARGET_FLIGHT),
+                dwell: recorder.beat(TARGET_REST),
+            })
+    }
+
+    fn develops_stills(&self) -> bool {
+        true
     }
 }
 
-/// The cache directory beneath which a product's showcase keeps its specimen:
-/// `<product>-acceptance` in the XDG cache home, an absolute `XDG_CACHE_HOME`
-/// or else `$HOME/.cache`. It is resolved, never created; `product` must be a
-/// kebab-case [`ArtifactStem`].
-pub fn specimen_cache(product: &str) -> Result<PathBuf> {
-    let product = ArtifactStem::new(product)?;
+/// The cache directory beneath which a product's showcase keeps its specimen,
+/// apart from everything an acceptance rail reads: `<product>-showcase` in the
+/// XDG cache home, an absolute `XDG_CACHE_HOME` or else `$HOME/.cache`. It is
+/// resolved, never created.
+pub fn specimen_cache(product: &ArtifactStem) -> Result<PathBuf> {
     let absolute = |name| {
         env::var_os(name)
             .map(PathBuf::from)
@@ -658,10 +678,10 @@ pub fn specimen_cache(product: &str) -> Result<PathBuf> {
     let home = absolute("XDG_CACHE_HOME")
         .or_else(|| absolute("HOME").map(|home| home.join(".cache")))
         .ok_or_else(|| Error::Unsupported {
-            capability: "specimen cache",
+            capability: "XDG cache home",
             detail: "neither XDG_CACHE_HOME nor HOME is an absolute path".to_owned(),
         })?;
-    Ok(home.join(format!("{product}-acceptance")))
+    Ok(home.join(format!("{product}-showcase")))
 }
 
 #[derive(Serialize)]
@@ -887,19 +907,70 @@ fn parent(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
+/// `<stem>-abandoned.mp4` beside `film`.
+fn abandoned(film: &Path) -> PathBuf {
+    let stem = film.file_stem().unwrap_or_default().to_string_lossy();
+    film.with_file_name(format!("{stem}-abandoned.mp4"))
+}
+
+/// A take's staging directory beside its artifacts' destination, locked for
+/// as long as the take lives, so a later take can tell it from a dead one's.
+struct Staging {
+    directory: TempDir,
+    _lock: File,
+}
+
+impl Staging {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
 /// Create `directory` and a staging directory inside it, on the filesystem
-/// every artifact published there will occupy.
-fn stage(directory: &Path) -> Result<TempDir> {
+/// every artifact published there will occupy, first sweeping away the
+/// staging a killed take left there.
+fn stage(directory: &Path) -> Result<Staging> {
     fs::create_dir_all(directory)
         .map_err(|source| io("create artifact directory", directory, source))?;
-    tempfile::Builder::new()
-        .prefix(".egui-demo-")
+    sweep(directory);
+    let staging = tempfile::Builder::new()
+        .prefix(STAGING_PREFIX)
         .tempdir_in(directory)
-        .map_err(|source| io("create artifact staging directory", directory, source))
+        .map_err(|source| io("create artifact staging directory", directory, source))?;
+    let lock_path = staging.path().join(STAGING_LOCK);
+    let lock = File::create(&lock_path)
+        .map_err(|source| io("create artifact staging lock", &lock_path, source))?;
+    lock.try_lock()
+        .map_err(|error| io("lock artifact staging", &lock_path, error.into()))?;
+    Ok(Staging {
+        directory: staging,
+        _lock: lock,
+    })
+}
+
+/// Remove, best effort, every staging directory in `directory` whose lock no
+/// live take holds. One still being created has no lock yet and stays.
+fn sweep(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGING_PREFIX)
+        {
+            continue;
+        }
+        let staging = entry.path();
+        if File::open(staging.join(STAGING_LOCK)).is_ok_and(|lock| lock.try_lock().is_ok()) {
+            let _swept = fs::remove_dir_all(&staging);
+        }
+    }
 }
 
 /// Where `path` develops inside `staging`.
-fn staged(staging: &TempDir, path: &Path) -> PathBuf {
+fn staged(staging: &Staging, path: &Path) -> PathBuf {
     staging.path().join(path.file_name().unwrap_or_default())
 }
 

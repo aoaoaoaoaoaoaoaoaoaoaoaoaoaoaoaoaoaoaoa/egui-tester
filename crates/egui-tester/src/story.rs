@@ -13,9 +13,9 @@ use crate::{
     Stroke, Testbed, Timed, Wheel, WindowQuery, X11Session, x11::Rest,
 };
 
-/// Quiet a still's presentation keeps before its cue. Ambient animation under
-/// the testbed's software renderer presents a pass every 100–250 ms, so a
-/// transition still under way shows its next change well within this span.
+/// Quiet a still's presentation keeps before its cue: several frames of even a
+/// slow software renderer, so a transition still under way presents a changed
+/// pass within it, yet little against a showcase's pacing.
 const STILL_REST: Duration = Duration::from_millis(400);
 /// Interval between the real pointer's steps on an approach glide.
 const GLIDE_STEP: Duration = Duration::from_millis(8);
@@ -173,16 +173,26 @@ pub trait StoryObserver {
         Ok(())
     }
 
-    /// The framing this observer's take demands. A desktop story imposes it
-    /// on the product window when the observer attaches.
+    /// The framing this observer's take demands, which a desktop story
+    /// imposes on the product window when the observer attaches. A
+    /// presentation policy: only a showcase take requests one.
     fn framing(&self) -> Option<Framing> {
         None
     }
 
-    /// How a desktop story's real pointer closes on each aimed destination.
-    /// It is asked at every aim, so it may follow the tempo.
+    /// How a desktop story's real pointer closes on each aimed destination,
+    /// asked at every aim so it may follow the tempo. A presentation policy:
+    /// only a showcase take requests anything but [`Approach::INSTANT`], so
+    /// every other observer sees the input an unobserved story injects.
     fn approach(&self) -> Approach {
         Approach::INSTANT
+    }
+
+    /// Whether this observer develops the stills a score names. A story rests
+    /// its presentation before a still only for such an observer; for any
+    /// other the cue passes at once.
+    fn develops_stills(&self) -> bool {
+        false
     }
 
     /// Whether this observer is admissible while production latency is judged.
@@ -231,8 +241,9 @@ pub struct Story<'app, 'bed, S, O = Silent> {
     reaction_budget: ReactionBudget,
     target_timeout: Duration,
     wait_timeout: Duration,
-    /// Bound on a still's rest. Host-declared motion outlasts ordinary waits:
-    /// Brass water stays astir for 14 s after a disturbance.
+    /// Bound on a still's rest. Host-declared motion may outlast any ordinary
+    /// wait, and the bound exists only to fail perpetual motion loudly, so it
+    /// defaults to twice the wait timeout's default.
     still_timeout: Duration,
     /// The framing imposed on the product window, and the monotonic instant
     /// it was imposed.
@@ -325,31 +336,30 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
     }
 
     /// Wait for the product's first presented pass. Under an observer's
-    /// framing, that is the first pass begun after the window was reframed,
-    /// and the window must then hold the framing.
+    /// framing, that is the first pass begun after the window was reframed
+    /// and presented at the framing's size; a host that declares no surface
+    /// size leaves the size unverified.
     pub fn ready(&mut self, timeout: Duration) -> Result<ProbeFrame<S>> {
         const DESCRIPTION: &str = "first product frame to reach surface present";
-        let reframed_ns = self.framing.map_or(0, |(_, reframed_ns)| reframed_ns);
+        let framing = self.framing;
+        let reframed_ns = framing.map_or(0, |(_, reframed_ns)| reframed_ns);
         let result = self.probe.wait_inspecting(
             self.session.application(),
             timeout,
             DESCRIPTION,
-            |frame| (frame.begun_ns >= reframed_ns).then_some(()).ok_or(None),
+            |frame| match (framing, frame.surface_size) {
+                _ if frame.begun_ns < reframed_ns => Err(None),
+                (Some((framing, _)), Some([width, height])) if !framing.frames(width, height) => {
+                    Err(Some(format!(
+                        "pass {} presented {width}×{height}, not the {framing} framing",
+                        frame.frame
+                    )))
+                }
+                _ => Ok(()),
+            },
             pace(&mut self.observer, &self.session),
         );
-        let frame = self.retain_failure_frame(result)?;
-        if let Some((framing, _)) = self.framing {
-            let [width, height] = self.session.geometry()?;
-            if !framing.frames(width, height) {
-                return Err(Error::Framing {
-                    framing,
-                    width,
-                    height,
-                });
-            }
-        }
-        self.emit_observation(DESCRIPTION, &frame)?;
-        Ok(frame)
+        self.retain_observation(DESCRIPTION, result)
     }
 
     pub fn frame(&mut self) -> Result<ProbeFrame<S>> {
@@ -727,16 +737,22 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         self.emit(StoryEvent::Cue(StoryCue::Tempo { tempo }))
     }
 
-    /// Offer observers the presented surface as the publishable still `name`
-    /// once the witnessed presentation rests: for 400 ms no presented pass
-    /// moves an anchor, changes the product state, or is declared astir by
-    /// its host, and the newest pass is calm. Ambient animation that does
-    /// none of these continues into the still. The rest is an editorial
-    /// guard over witnessed passes, never a synchronization verdict, and a
-    /// presentation that never rests within the still timeout, 20 s unless
-    /// [`Self::with_still_timeout`] says otherwise, fails the story with what
-    /// kept it moving.
+    /// Offer observers the presented surface as the publishable still `name`.
+    ///
+    /// When the observer develops stills, the cue waits for the witnessed
+    /// presentation to rest: for 400 ms no presented pass moves an anchor,
+    /// changes the product state, or is declared astir by its host, and the
+    /// newest pass is calm. Ambient animation that does none of these
+    /// continues into the still. Under a framing, the resting pass must have
+    /// presented at the framing's size where its host declares one. The rest
+    /// is an editorial guard over witnessed passes, never a synchronization
+    /// verdict; a presentation that never rests within the still timeout, 20 s
+    /// unless [`Self::with_still_timeout`] says otherwise, fails the story with
+    /// what kept it moving. For any other observer the cue passes at once.
     pub fn still(&mut self, name: &ArtifactStem) -> Result<()> {
+        if !self.observer.develops_stills() {
+            return self.emit(StoryEvent::Cue(StoryCue::Still { name }));
+        }
         let description = format!("presentation at rest for still `{name}`");
         let result = self.probe.wait_rest_paced(
             self.session.application(),
@@ -745,8 +761,18 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
             description.clone(),
             pace(&mut self.observer, &self.session),
         );
-        let _rested = self.retain_observation(&description, result)?;
-        self.emit(StoryEvent::Cue(StoryCue::Still { name }))
+        let rested = self.retain_failure_frame(result)?;
+        if let (Some((framing, _)), Some([width, height])) = (self.framing, rested.surface_size)
+            && !framing.frames(width, height)
+        {
+            return Err(Error::Framing {
+                framing,
+                width,
+                height,
+            });
+        }
+        self.emit(StoryEvent::Cue(StoryCue::Still { name }))?;
+        self.emit_observation(&description, &rested)
     }
 
     pub fn capture(&self) -> Result<Frame> {

@@ -35,6 +35,10 @@ pub struct ProbeFrame<S = Value> {
     /// pass. A host that declares nothing leaves every pass calm.
     #[serde(default)]
     pub astir: bool,
+    /// The physical size of the surface the pass presented, when its host
+    /// declares one.
+    #[serde(default)]
+    pub surface_size: Option<[u32; 2]>,
 }
 
 impl<S> ProbeFrame<S> {
@@ -399,7 +403,10 @@ impl<S: DeserializeOwned> Probe<S> {
         let description = description.into();
         let begun = Instant::now();
         let mut unrest = Unrest::default();
-        let mut held = self.current::<Value>()?.map(|frame| (frame, begun));
+        let mut held = self.current::<Value>()?.map(|frame| {
+            unrest.witness(&frame);
+            (frame, begun)
+        });
         loop {
             app.ensure_running(&description)?;
             self.refill()?;
@@ -407,7 +414,10 @@ impl<S: DeserializeOwned> Probe<S> {
                 let since = match held.take() {
                     Some((prior, since)) if !unrest.disturbed(&prior, &frame) => since,
                     Some(_) => Instant::now(),
-                    None => begun,
+                    None => {
+                        unrest.witness(&frame);
+                        begun
+                    }
                 };
                 held = Some((frame, since));
             }
@@ -604,6 +614,9 @@ impl<S: DeserializeOwned> Probe<S> {
         if !frame.ppp.is_finite() || frame.ppp <= 0.0 {
             return self.invalid("pixels per point must be positive and finite".to_owned());
         }
+        if frame.surface_size.is_some_and(|size| size.contains(&0)) {
+            return self.invalid("a declared surface size must be nonzero".to_owned());
+        }
         validate_anchors(&self.path, &frame.anchors)
     }
 
@@ -765,10 +778,16 @@ struct Unrest {
 }
 
 impl Unrest {
-    /// Count `frame`; whether it disturbed the presentation `prior` held.
-    fn disturbed(&mut self, prior: &ProbeFrame<Value>, frame: &ProbeFrame<Value>) -> bool {
+    /// Count `frame`, and whether its host declared it astir.
+    fn witness(&mut self, frame: &ProbeFrame<Value>) {
         self.passes = self.passes.saturating_add(1);
         self.last_presented_ns = frame.surface_presented_ns;
+        self.astir = self.astir.saturating_add(u32::from(frame.astir));
+    }
+
+    /// Count `frame`; whether it disturbed the presentation `prior` held.
+    fn disturbed(&mut self, prior: &ProbeFrame<Value>, frame: &ProbeFrame<Value>) -> bool {
+        self.witness(frame);
         let moved = frame
             .anchors
             .iter()
@@ -783,7 +802,6 @@ impl Unrest {
             .collect::<Vec<_>>();
         let restated = prior.state != frame.state;
         self.restated = self.restated.saturating_add(u32::from(restated));
-        self.astir = self.astir.saturating_add(u32::from(frame.astir));
         let disturbed = frame.astir || restated || !moved.is_empty();
         self.moved.extend(moved);
         disturbed
@@ -877,6 +895,7 @@ mod tests {
             ],
             state: Value::Null,
             astir: false,
+            surface_size: None,
         };
         assert!(probe.validate(&frame).is_err());
     }
