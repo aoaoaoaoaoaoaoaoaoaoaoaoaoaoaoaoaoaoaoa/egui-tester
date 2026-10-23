@@ -354,9 +354,9 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
 
     pub fn click_anchor(&mut self, anchor: &Anchor) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
         let (x, y) = anchor.center();
-        self.aim(Some(&anchor.name), (x, y), Some(anchor))?;
+        self.aim(Some(anchor.name.as_str()), (x, y), Some(anchor))?;
         let receipt = self.session.click(x, y, Button::Primary)?;
-        self.emit_action(&receipt, Some(&anchor.name), Some((x, y)))?;
+        self.emit_action(&receipt, Some(anchor.name.as_str()), Some((x, y)))?;
         Ok(self.reaction_named(receipt, format!("click `{}`", anchor.name)))
     }
 

@@ -34,7 +34,7 @@ fn drives_real_input_and_observes_pixels() {
 
     let mut probe = LegacyJsonProbe::new(probe_path);
     let increment = probe
-        .wait_anchor(&app, "increment", Duration::from_secs(5))
+        .wait_anchor(&app, "fixture.increment", Duration::from_secs(5))
         .expect("locate increment button");
     let before = session.capture().expect("capture initial pixels");
     let (x, y) = increment.center();
@@ -61,7 +61,7 @@ fn drives_real_input_and_observes_pixels() {
     );
 
     let text = probe
-        .wait_anchor(&app, "text", Duration::from_secs(3))
+        .wait_anchor(&app, "fixture.text", Duration::from_secs(3))
         .expect("locate text field");
     let (x, y) = text.center();
     let _receipt = session
@@ -98,7 +98,7 @@ fn drives_real_input_and_observes_pixels() {
         .expect("observe modified keyboard input");
 
     let drag = probe
-        .wait_anchor(&app, "drag", Duration::from_secs(3))
+        .wait_anchor(&app, "fixture.drag", Duration::from_secs(3))
         .expect("locate draggable slider");
     let [x0, y0, x1, y1] = drag.rect;
     let _dragged = session

@@ -156,20 +156,20 @@ impl eframe::App for Fixture {
             let _heading = ui.heading("Black-box fixture");
             let _count = ui.label(format!("Count: {}", self.count));
             let increment = ui.button("Increment");
-            anchors.push(anchor("increment", increment.rect));
+            anchors.push(anchor("fixture.increment", increment.rect));
             if increment.clicked() {
                 self.count += 1;
             }
             let toggle = ui.button("Toggle color");
-            anchors.push(anchor("toggle", toggle.rect));
+            anchors.push(anchor("fixture.toggle", toggle.rect));
             if toggle.clicked() {
                 self.violet = !self.violet;
             }
             let text = ui.text_edit_singleline(&mut self.text);
-            anchors.push(anchor("text", text.rect));
+            anchors.push(anchor("fixture.text", text.rect));
             text_focused = text.has_focus();
             let drag = ui.add(egui::Slider::new(&mut self.drag_value, 0.0..=100.0));
-            anchors.push(anchor("drag", drag.rect));
+            anchors.push(anchor("fixture.drag", drag.rect));
         });
         if let Some(path) = &self.probe {
             let probe = Probe {

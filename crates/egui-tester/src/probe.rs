@@ -8,6 +8,7 @@ use std::{
 };
 
 pub use egui_tester_witness::Anchor;
+use egui_tester_witness::TargetName;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -216,6 +217,7 @@ impl<S: DeserializeOwned> Probe<S> {
         name: &str,
         timeout: Duration,
     ) -> Result<Anchor> {
+        admit(name)?;
         let frame = self.wait(app, timeout, format!("witness anchor `{name}`"), |frame| {
             frame.anchor(name).is_some()
         })?;
@@ -232,6 +234,7 @@ impl<S: DeserializeOwned> Probe<S> {
         name: &str,
         timeout: Duration,
     ) -> Result<Anchor> {
+        admit(name)?;
         let frame = self.wait_checked(
             app,
             timeout,
@@ -622,6 +625,7 @@ impl<S: DeserializeOwned> LegacyProbe<S> {
         name: &str,
         timeout: Duration,
     ) -> Result<Anchor> {
+        admit(name)?;
         let frame = self.wait(app, timeout, format!("legacy anchor `{name}`"), |frame| {
             frame.anchor(name).is_some()
         })?;
@@ -644,6 +648,15 @@ impl<S: DeserializeOwned> LegacyProbe<S> {
             |frame| frame.frame > prior,
         )
     }
+}
+
+/// Refuse a lookup no witness can satisfy: an off-grammar Target name.
+fn admit(name: &str) -> Result<()> {
+    TargetName::new(name)
+        .map(drop)
+        .map_err(|error| Error::Score {
+            detail: error.to_string(),
+        })
 }
 
 fn validate_anchors(path: &Path, anchors: &[Anchor]) -> Result<()> {
@@ -681,8 +694,8 @@ mod tests {
             surface_sequence: 1,
             ppp: 1.0,
             anchors: vec![
-                Anchor::physical("same", [0.0, 0.0, 1.0, 1.0]).expect("first"),
-                Anchor::physical("same", [1.0, 1.0, 2.0, 2.0]).expect("second"),
+                Anchor::physical("probe.same", [0.0, 0.0, 1.0, 1.0]).expect("first"),
+                Anchor::physical("probe.same", [1.0, 1.0, 2.0, 2.0]).expect("second"),
             ],
             state: Value::Null,
         };

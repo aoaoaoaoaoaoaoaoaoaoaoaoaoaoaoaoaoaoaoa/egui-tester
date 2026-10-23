@@ -3,17 +3,17 @@ use super::*;
 #[test]
 fn anchor_contract_preserves_scale_legacy_focus_and_unique_identity() {
     let anchor =
-        Anchor::logical("blade", [1.0, 2.0, 3.0, 4.0], 1.5).expect("forge physical anchor");
+        Anchor::logical("witness.blade", [1.0, 2.0, 3.0, 4.0], 1.5).expect("forge physical anchor");
     assert_eq!(anchor.rect, [1.5, 3.0, 4.5, 6.0]);
     assert!(!anchor.focused);
 
-    let legacy: Anchor =
-        serde_json::from_str(r#"{"name":"blade","rect":[0,0,1,1]}"#).expect("decode legacy anchor");
+    let legacy: Anchor = serde_json::from_str(r#"{"name":"witness.blade","rect":[0,0,1,1]}"#)
+        .expect("decode legacy anchor");
     assert!(!legacy.focused);
 
     let anchors = [
-        Anchor::physical("blade", [0.0, 0.0, 1.0, 1.0]).expect("first anchor"),
-        Anchor::physical("blade", [1.0, 1.0, 2.0, 2.0]).expect("second anchor"),
+        Anchor::physical("witness.blade", [0.0, 0.0, 1.0, 1.0]).expect("first anchor"),
+        Anchor::physical("witness.blade", [1.0, 1.0, 2.0, 2.0]).expect("second anchor"),
     ];
     assert!(PendingFrame::forge(1, 1.0, anchors, ()).is_err());
 }
@@ -160,14 +160,14 @@ fn final_egui_pass_projects_only_presented_targets_and_focus() {
         if pass == 1 {
             egui::record_rect(
                 ui.ctx(),
-                "discarded",
+                "witness.discarded",
                 Rect::from_min_max(pos2(1.0, 0.0), pos2(2.0, 1.0)),
             );
             ui.ctx().request_discard("exercise final-pass telemetry");
         }
         let blade = ui.allocate_response(::egui::vec2(60.0, 20.0), ::egui::Sense::click());
         blade.request_focus();
-        egui::record_response(ui, "blade", &blade);
+        egui::record_response(ui, "witness.blade", &blade);
     })
     .drop_without_applying_deltas();
     let anchors = egui::take(&ctx, 1.0).expect("focused response anchors");
@@ -175,6 +175,6 @@ fn final_egui_pass_projects_only_presented_targets_and_focus() {
     let [blade] = anchors.as_slice() else {
         panic!("expected only the final-pass blade, found {anchors:?}");
     };
-    assert_eq!(blade.name, "blade");
+    assert_eq!(blade.name, "witness.blade");
     assert!(blade.focused);
 }

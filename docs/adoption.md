@@ -19,8 +19,14 @@ scripts/test-gui
 The contract crate owns stable product vocabulary shared by GUI and
 acceptance: application identity, schema fingerprint, Target names, and any
 small enums that cross the observation wire. A Target need only implement
-`Display`; the contract remains independent of the tester. Handwritten Rust is
-the present source of truth. Derives or a shared contract-language crate should
+`Display`, and what it displays must be a `TargetName`. The contract stays
+independent of the tester but may depend on `egui-tester-witness`, the wire
+law, without its `egui` feature: `TargetName` admits names, and
+`encode_identity` spells raw runtime identity, so no product keeps a private
+encoder. That pulls `serde`, `serde_json`, `thiserror`, and `rustix` on Unix or
+`windows-sys` on Windows. Other targets, such as wasm, compile it without the
+host clock, so the clock-reading constructors are absent there. Handwritten Rust
+is the present source of truth. Derives or a shared contract-language crate should
 appear only after a second product reveals repeated syntax.
 
 Acceptance defines a deliberately partial `Deserialize` observation. It may

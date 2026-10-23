@@ -1,6 +1,9 @@
-use std::fmt::{self, Display, Formatter};
+use std::{
+    fmt::{self, Display, Formatter, Write as _},
+    ops::Deref,
+};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{Error, Result};
 
@@ -10,9 +13,10 @@ use crate::{Error, Result};
 /// optional slash-delimited tuple of encoded runtime identities:
 /// `owner.semantic.path[/identity...]`. Semantic material always precedes the
 /// first slash. Identity components admit ASCII unreserved characters and
-/// canonical percent escapes.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
+/// canonical percent escapes; [`encode_identity`] spells raw text that way.
+/// Deserialization admits only canonical names, so a reader holds the same law
+/// as a publisher.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TargetName(String);
 
 impl TargetName {
@@ -33,6 +37,38 @@ impl TargetName {
     #[must_use]
     pub fn into_string(self) -> String {
         self.0
+    }
+}
+
+impl Deref for TargetName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for TargetName {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for TargetName {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl Serialize for TargetName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TargetName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
     }
 }
 
@@ -62,6 +98,37 @@ impl TryFrom<&str> for TargetName {
     fn try_from(name: &str) -> Result<Self> {
         Self::new(name)
     }
+}
+
+/// Spell one raw runtime identity as a canonical identity component: unreserved
+/// ASCII stays literal and every other byte becomes an uppercase percent escape,
+/// exactly what [`TargetName`] admits after a slash. An empty identity stays
+/// empty, which no name admits.
+pub fn encode_identity(raw: &str) -> impl Display + '_ {
+    struct Encoded<'a>(&'a str);
+
+    impl Display for Encoded<'_> {
+        fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            for byte in self.0.bytes() {
+                if unreserved(byte) {
+                    formatter.write_char(char::from(byte))?;
+                } else {
+                    formatter.write_char('%')?;
+                    formatter.write_char(char::from(HEX[usize::from(byte >> 4)]))?;
+                    formatter.write_char(char::from(HEX[usize::from(byte & 0x0f)]))?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    Encoded(raw)
+}
+
+/// RFC 3986 unreserved ASCII: the bytes an identity spells literally.
+const fn unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
 }
 
 fn validate(name: &str) -> Result<()> {
@@ -124,11 +191,11 @@ fn valid_identity(identity: &str) -> bool {
                 return false;
             }
             let decoded = (hex_value(bytes[index + 1]) << 4) | hex_value(bytes[index + 2]);
-            if decoded.is_ascii_alphanumeric() || matches!(decoded, b'-' | b'.' | b'_' | b'~') {
+            if unreserved(decoded) {
                 return false;
             }
             index += 3;
-        } else if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+        } else if unreserved(byte) {
             index += 1;
         } else {
             return false;
@@ -151,7 +218,7 @@ fn hex_value(byte: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::TargetName;
+    use super::{TargetName, encode_identity};
 
     #[test]
     fn canonical_names_separate_semantics_from_identity() {
@@ -181,6 +248,18 @@ mod tests {
             "abv.filter.entry/%41",
         ] {
             assert!(TargetName::new(name).is_err(), "admitted `{name}`");
+        }
+    }
+
+    #[test]
+    fn every_encoded_identity_is_admitted() {
+        for character in (0..0x0800)
+            .chain([0xFFFD, 0x1_F600])
+            .filter_map(char::from_u32)
+        {
+            let raw = format!("{character}a{character}");
+            let name = format!("owner.path/{}", encode_identity(&raw));
+            assert!(TargetName::new(name).is_ok(), "refused encoded {raw:?}");
         }
     }
 }

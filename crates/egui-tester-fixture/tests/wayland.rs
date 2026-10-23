@@ -34,7 +34,7 @@ fn launches_and_captures_on_headless_wayland() {
         .expect("launch Wayland fixture");
     let mut probe = LegacyJsonProbe::new(probe_path);
     let _frame = probe
-        .wait_anchor(&app, "increment", Duration::from_secs(15))
+        .wait_anchor(&app, "fixture.increment", Duration::from_secs(15))
         .expect("observe a rendered Wayland UI frame");
     let deadline = Instant::now() + Duration::from_secs(5);
     let pixels = loop {

@@ -15,7 +15,11 @@ uses `owner.semantic.path[/identity...]`: dotted kebab-case segments express
 stable semantics, and slash-delimited encoded components carry runtime
 identity. Semantic segments admit neither underscores nor colons. After the
 first slash, only unreserved ASCII and canonical percent escapes are admitted;
-raw user text is encoded.
+raw user text is encoded with `encode_identity`. `TargetName` is that grammar as a
+type: an Anchor's name is one, so `egui::take` refuses a pass that recorded an
+off-grammar name, a probe refuses a frame carrying one, and a lookup by an
+off-grammar name fails at once instead of waiting for a Target that cannot
+exist.
 
 **Anchor** is one Target's observed physical rectangle and keyboard-focus fact
 in a presented frame. A Target may be absent; an Anchor is frame evidence.

@@ -66,12 +66,12 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 mod target;
-pub use target::TargetName;
+pub use target::{TargetName, encode_identity};
 
 /// Named hit-test rectangle in physical, window-relative pixels.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Anchor {
-    pub name: String,
+    pub name: TargetName,
     pub rect: [f32; 4],
     /// Whether this target owned keyboard focus in the presented egui pass.
     ///
@@ -84,7 +84,7 @@ pub struct Anchor {
 impl Anchor {
     pub fn physical(name: impl Into<String>, rect: [f32; 4]) -> Result<Self> {
         let anchor = Self {
-            name: name.into(),
+            name: TargetName::new(name)?,
             rect,
             focused: false,
         };
@@ -111,21 +111,15 @@ impl Anchor {
 
     pub fn validate(&self) -> Result<()> {
         let [x0, y0, x1, y1] = self.rect;
-        if self.name.is_empty() {
-            return Err(Error::Anchor {
-                name: self.name.clone(),
-                detail: "name is empty",
-            });
-        }
         if !self.rect.into_iter().all(f32::is_finite) {
             return Err(Error::Anchor {
-                name: self.name.clone(),
+                name: self.name.to_string(),
                 detail: "rectangle is not finite",
             });
         }
         if x0 > x1 || y0 > y1 {
             return Err(Error::Anchor {
-                name: self.name.clone(),
+                name: self.name.to_string(),
                 detail: "rectangle is inverted",
             });
         }
@@ -153,6 +147,7 @@ pub struct PendingFrame<T> {
 }
 
 impl<T> PendingFrame<T> {
+    #[cfg(any(unix, windows))]
     pub fn forge(
         frame: u64,
         pixels_per_point: f32,
@@ -189,7 +184,7 @@ impl<T> PendingFrame<T> {
             anchor.validate()?;
             if !names.insert(&anchor.name) {
                 return Err(Error::Anchor {
-                    name: anchor.name.clone(),
+                    name: anchor.name.to_string(),
                     detail: "name is duplicated in one frame",
                 });
             }
@@ -295,6 +290,7 @@ impl<T: Serialize + Send + 'static> Publisher<T> {
     }
 
     /// Enqueue one observation after its product frame reaches surface present.
+    #[cfg(any(unix, windows))]
     pub fn surface_present(&mut self, pending: PendingFrame<T>) -> Result<u64> {
         self.surface_present_at(pending, ProductInstant::now())
     }
@@ -570,7 +566,10 @@ impl ObservationJournal {
 pub struct ProductInstant(u64);
 
 impl ProductInstant {
+    /// Read the host clock; only Unix and Windows hosts carry one, so other
+    /// targets keep the wire law without the publisher's clock.
     #[must_use]
+    #[cfg(any(unix, windows))]
     pub fn now() -> Self {
         Self(monotonic_ns())
     }
@@ -584,6 +583,7 @@ pub struct FramePulse {
 
 impl FramePulse {
     #[must_use]
+    #[cfg(any(unix, windows))]
     pub fn begin() -> Self {
         Self {
             begun: ProductInstant::now(),
@@ -591,6 +591,7 @@ impl FramePulse {
     }
 
     #[must_use]
+    #[cfg(any(unix, windows))]
     pub fn observe(self) -> FrameObservation {
         FrameObservation {
             begun_ns: self.begun.0,
@@ -731,9 +732,6 @@ pub fn monotonic_ns() -> u64 {
     u64::try_from(u128::from(count).saturating_mul(1_000_000_000) / u128::from(frequency))
         .unwrap_or(u64::MAX)
 }
-
-#[cfg(not(any(unix, windows)))]
-compile_error!("egui-tester-witness requires a Unix or Windows monotonic host clock");
 
 fn open_frame_journal(path: &Path, launch: &str) -> Result<File> {
     if let Some(parent) = path.parent() {
@@ -1065,7 +1063,8 @@ pub mod egui {
         });
     }
 
-    /// Register a semantic target for the current egui pass.
+    /// Register a semantic target for the current egui pass. `name` must be a
+    /// [`TargetName`](crate::TargetName); [`take`] fails the pass otherwise.
     pub fn record(ui: &Ui, name: impl Into<String>, rect: Rect) {
         record_rect(ui.ctx(), name, rect);
     }
@@ -1088,7 +1087,9 @@ pub mod egui {
         });
     }
 
-    /// Consume the current pass's targets in physical-pixel coordinates.
+    /// Consume the current pass's targets in physical-pixel coordinates,
+    /// refusing the pass if any recorded name is not a canonical
+    /// [`TargetName`](crate::TargetName).
     pub fn take(ctx: &Context, pixels_per_point: f32) -> Result<Vec<Anchor>> {
         ctx.data_mut(|data| data.remove_temp::<Anchors>(Id::new(STORE)))
             .unwrap_or_default()
