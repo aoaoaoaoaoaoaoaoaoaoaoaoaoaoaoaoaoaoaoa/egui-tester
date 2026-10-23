@@ -145,6 +145,13 @@ impl StorySurface<'_> {
 pub trait StoryObserver {
     fn observe(&mut self, event: StoryEvent<'_>, surface: StorySurface<'_>) -> Result<()>;
 
+    /// Offered between journal polls while the story awaits the product, so
+    /// a film keeps its clock through product work. It must return promptly
+    /// and sample only what is due.
+    fn awaiting(&mut self, _surface: StorySurface<'_>) -> Result<()> {
+        Ok(())
+    }
+
     /// Close one launch's segment of a take. The observer may continue the
     /// take through a relaunched story, so this must not seal it.
     fn finish(&mut self, _surface: StorySurface<'_>) -> Result<()> {
@@ -287,11 +294,12 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         condition: Condition<S>,
     ) -> Result<ProbeFrame<S>> {
         let description = condition.description().to_owned();
-        let result = self.probe.wait_checked(
+        let result = self.probe.wait_inspecting(
             self.session.application(),
             timeout,
             description.clone(),
-            |frame| condition.evaluate(&frame.state),
+            |frame| condition.evaluate(&frame.state).map_err(Some),
+            pace(&mut self.observer, &self.session),
         );
         self.retain_observation(&description, result)
     }
@@ -304,21 +312,25 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         project: impl FnMut(&ProbeFrame<S>) -> Option<T>,
     ) -> Result<ProbeFrame<S>> {
         let description = description.into();
-        let result = self.probe.wait_stable(
+        let result = self.probe.wait_stable_paced(
             self.session.application(),
             timeout,
             quiet,
             description.clone(),
             project,
+            pace(&mut self.observer, &self.session),
         );
         self.retain_observation(&description, result)
     }
 
     pub fn anchor(&mut self, target: impl Display) -> Result<Anchor> {
         let name = target.to_string();
-        let result = self
-            .probe
-            .wait_anchor(self.session.application(), &name, self.target_timeout);
+        let result = self.probe.wait_anchor_paced(
+            self.session.application(),
+            &name,
+            self.target_timeout,
+            pace(&mut self.observer, &self.session),
+        );
         let anchor = self.retain_failure_frame(result)?;
         self.emit(StoryEvent::Fact(StoryFact::TargetResolved {
             target: &name,
@@ -780,12 +792,13 @@ impl<S: DeserializeOwned + 'static, O: StoryObserver> Reaction<'_, '_, '_, S, O>
                     .to_owned(),
             });
         }
-        let result = self.story.probe.wait_budgeted_checked(
+        let result = self.story.probe.wait_budgeted_paced(
             self.story.session.application(),
             &self.receipt,
             self.budget,
             description.clone(),
             |frame| condition.evaluate(&frame.state),
+            pace(&mut self.story.observer, &self.story.session),
         );
         let timed = self.story.retain_failure_frame(result)?;
         self.story.emit_observation(&description, timed.value())?;
@@ -799,6 +812,18 @@ impl<S: DeserializeOwned + 'static, O: StoryObserver> Reaction<'_, '_, '_, S, O>
 
 /// Admit a still only under a kebab-case artifact stem, before any observer
 /// can turn the name into a path.
+/// The between-polls step of a story wait: offer the observer the surface,
+/// then rest one poll interval.
+fn pace<'s, O: StoryObserver>(
+    observer: &'s mut O,
+    session: &'s X11Session<'_, '_>,
+) -> impl FnMut() -> Result<()> + 's {
+    move || {
+        observer.awaiting(StorySurface { surface: session })?;
+        crate::probe::rest()
+    }
+}
+
 pub(crate) fn still_cue(name: &str) -> Result<StoryEvent<'_>> {
     let lawful = name.split('-').all(|segment| {
         !segment.is_empty()

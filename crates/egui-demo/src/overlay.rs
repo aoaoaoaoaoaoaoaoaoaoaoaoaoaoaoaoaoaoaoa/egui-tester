@@ -62,12 +62,11 @@ pub(crate) enum Scene<'a> {
         pointer: Point,
         target: Option<Rect>,
     },
-    /// An action was dispatched `phase` of `phases` ticks ago.
+    /// An action was dispatched; `progress` runs through its beat from 0 to 1.
     Strike {
         pointer: Option<Point>,
         target: Option<Rect>,
-        phase: u32,
-        phases: u32,
+        progress: f64,
     },
     Rest {
         pointer: Option<Point>,
@@ -96,12 +95,11 @@ pub(crate) struct Point {
 }
 
 impl Point {
-    pub(crate) fn lerp(self, other: Self, step: u32, steps: u32) -> Self {
-        let step = i64::from(step);
-        let steps = i64::from(steps);
+    pub(crate) fn lerp(self, other: Self, progress: f64) -> Self {
+        let towards = |from: i32, to: i32| from + (f64::from(to - from) * progress).round() as i32;
         Self {
-            x: (i64::from(self.x) + i64::from(other.x - self.x) * step / steps) as i32,
-            y: (i64::from(self.y) + i64::from(other.y - self.y) * step / steps) as i32,
+            x: towards(self.x, other.x),
+            y: towards(self.y, other.y),
         }
     }
 }
@@ -162,14 +160,13 @@ impl<'a> Canvas<'a> {
             Scene::Strike {
                 pointer,
                 target,
-                phase,
-                phases,
+                progress,
             } => {
                 if let Some(target) = target {
                     self.outline(target, [35, 211, 255, 180], 2);
                 }
                 if let Some(pointer) = pointer {
-                    let radius = 10 + (phase * 8 / phases.max(1)) as i32;
+                    let radius = 10 + ((progress * 8.0) as i32).min(7);
                     self.ring(pointer, radius, radius + 3, [255, 206, 75, 230]);
                 }
             }

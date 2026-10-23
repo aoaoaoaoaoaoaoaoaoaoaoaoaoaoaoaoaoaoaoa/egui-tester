@@ -104,6 +104,8 @@ pub struct Recorder {
     trace: BufWriter<File>,
     encoder: Option<Encoder>,
     scratch: Vec<u8>,
+    clock: Option<FilmClock>,
+    capture_cost: Duration,
     pointer: Option<Point>,
     target: Option<Rect>,
     tempo: StoryTempo,
@@ -138,6 +140,8 @@ impl Recorder {
             trace,
             encoder: None,
             scratch: Vec::new(),
+            clock: None,
+            capture_cost: Duration::ZERO,
             pointer: None,
             target: None,
             tempo: StoryTempo::STANDARD,
@@ -186,14 +190,12 @@ impl Recorder {
         let origin = self.pointer.unwrap_or(destination);
         let target = anchor.map(|anchor| Rect::from(anchor.rect));
         self.target = target;
-        self.live_interval(surface, self.beat(TARGET_FLIGHT), |step, steps| {
-            Scene::Aim {
-                pointer: origin.lerp(destination, step + 1, steps),
-                target,
-            }
+        self.live_interval(surface, self.beat(TARGET_FLIGHT), |progress| Scene::Aim {
+            pointer: origin.lerp(destination, progress),
+            target,
         })?;
         self.pointer = Some(destination);
-        self.live_interval(surface, self.beat(TARGET_REST), |_, _| Scene::Aim {
+        self.live_interval(surface, self.beat(TARGET_REST), |_| Scene::Aim {
             pointer: destination,
             target,
         })
@@ -204,70 +206,101 @@ impl Recorder {
             self.pointer = Some(Point::from(pointer));
         }
         let (pointer, target) = (self.pointer, self.target);
-        self.live_interval(surface, self.beat(ACTION_REST), |phase, phases| {
-            Scene::Strike {
-                pointer,
-                target,
-                phase,
-                phases,
-            }
+        self.live_interval(surface, self.beat(ACTION_REST), |progress| Scene::Strike {
+            pointer,
+            target,
+            progress,
         })
     }
 
     fn rest(&mut self, surface: StorySurface<'_>, duration: Duration) -> Result<()> {
         let pointer = self.pointer;
-        self.live_interval(surface, duration, |_, _| Scene::Rest { pointer })
+        self.live_interval(surface, duration, |_| Scene::Rest { pointer })
     }
 
     /// A chapter rests on the surface for the same span under every overlay;
     /// only the diagnostic overlay paints its title.
     fn chapter(&mut self, surface: StorySurface<'_>, title: &str) -> Result<()> {
         let pointer = self.pointer;
-        self.live_interval(surface, CHAPTER_REST, |_, _| Scene::Chapter {
-            title,
-            pointer,
-        })
+        self.live_interval(surface, CHAPTER_REST, |_| Scene::Chapter { title, pointer })
     }
 
     fn beat(&self, duration: Duration) -> Duration {
         duration / u32::from(self.tempo.factor())
     }
 
-    /// Sample continuously while advancing an invariant output clock. When a
-    /// capture exceeds one film period, the freshest product frame fills every
-    /// elapsed tick; compression or capture latency cannot stretch world time.
+    /// Hold the story for `duration` of live product time, sampling every film
+    /// tick it spans; `scene` paints a tick by its progress through the interval.
+    /// Each capture is scheduled one capture cost ahead of its tick.
     fn live_interval<'a>(
         &mut self,
         surface: StorySurface<'_>,
         duration: Duration,
-        mut scene: impl FnMut(u32, u32) -> Scene<'a>,
+        mut scene: impl FnMut(f64) -> Scene<'a>,
     ) -> Result<()> {
-        let count = self.frames(duration);
-        let period = self.frame_period();
+        let fps = self.config.frames_per_second;
         let begun = Instant::now();
-        let mut phase = 0;
-        let mut capture_cost = Duration::ZERO;
-        while phase < count {
-            let tick = begun + period * phase;
-            let capture_at = tick.checked_sub(capture_cost).unwrap_or(begun);
-            if let Some(rest) = capture_at.checked_duration_since(Instant::now()) {
+        let end = begun + duration;
+        loop {
+            let tick = self.segment().next_tick(fps);
+            if tick > end {
+                if let Some(rest) = end.checked_duration_since(Instant::now()) {
+                    thread::sleep(rest);
+                }
+                return Ok(());
+            }
+            if let Some(rest) = tick
+                .checked_sub(self.capture_cost)
+                .and_then(|wake| wake.checked_duration_since(Instant::now()))
+            {
                 thread::sleep(rest);
             }
-            let capture_begun = Instant::now();
-            let frame = surface.capture()?;
-            let paint = self.config.overlay.bind(surface)?;
-            capture_cost = capture_begun.elapsed();
-            let due = self.frames_due(begun.elapsed()).min(count).max(phase + 1);
-            while phase < due {
-                self.write_scene(&frame, &paint, scene(phase, count))?;
-                phase += 1;
-            }
+            self.sample(surface, |at| scene(progress(begun, duration, at)))?;
         }
-        Ok(())
     }
 
-    fn frame_period(&self) -> Duration {
-        Duration::from_secs_f64(1.0 / f64::from(self.config.frames_per_second.get()))
+    /// The current segment's clock, begun now if no story event began it.
+    fn segment(&mut self) -> &mut FilmClock {
+        let base = self.frames_written;
+        self.clock
+            .get_or_insert_with(|| FilmClock::start(Instant::now(), base))
+    }
+
+    /// Fill the ticks that fell due since the last sample with the story at
+    /// rest: the film's share of time the story spent waiting or acting.
+    fn catch_up(&mut self, surface: StorySurface<'_>) -> Result<()> {
+        let fps = self.config.frames_per_second;
+        match self.clock {
+            Some(clock) if clock.next_tick(fps) <= Instant::now() => {
+                let pointer = self.pointer;
+                self.sample(surface, |_| Scene::Rest { pointer })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Write every film tick due by now from one fresh capture; the freshest
+    /// product frame fills every tick that elapsed since the last.
+    fn sample<'a>(
+        &mut self,
+        surface: StorySurface<'_>,
+        mut scene: impl FnMut(Instant) -> Scene<'a>,
+    ) -> Result<()> {
+        let fps = self.config.frames_per_second;
+        let captured = Instant::now();
+        let frame = surface.capture()?;
+        let paint = self.config.overlay.bind(surface)?;
+        self.capture_cost = captured.elapsed();
+        let clock = *self.segment();
+        let due = clock.due(Instant::now(), fps);
+        for index in clock.ticks..due {
+            self.write_scene(&frame, &paint, scene(clock.tick(index, fps)))?;
+        }
+        self.clock = Some(FilmClock {
+            ticks: clock.ticks.max(due),
+            ..clock
+        });
+        Ok(())
     }
 
     fn write_scene(&mut self, frame: &Frame, paint: &Paint, scene: Scene<'_>) -> Result<()> {
@@ -290,25 +323,19 @@ impl Recorder {
         Ok(())
     }
 
-    fn frames(&self, duration: Duration) -> u32 {
-        let numerator = duration.as_nanos() * u128::from(self.config.frames_per_second.get());
-        let count = numerator.div_ceil(1_000_000_000).max(1);
-        u32::try_from(count).unwrap_or(u32::MAX)
-    }
-
-    fn frames_due(&self, elapsed: Duration) -> u32 {
-        let count = elapsed.as_nanos() * u128::from(self.config.frames_per_second.get())
-            / 1_000_000_000
-            + 1;
-        u32::try_from(count).unwrap_or(u32::MAX)
-    }
-
-    fn trace(&mut self, event: StoryEvent<'_>) -> Result<()> {
-        let elapsed_ns = u64::try_from(self.begun.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    /// Record `event` as it stood at `at`: its film frame is the first tick at
+    /// or after that instant, wherever encoding has reached.
+    fn trace(&mut self, event: StoryEvent<'_>, at: Instant) -> Result<()> {
+        let fps = self.config.frames_per_second;
+        let elapsed_ns =
+            u64::try_from(at.saturating_duration_since(self.begun).as_nanos()).unwrap_or(u64::MAX);
+        let film_frame = self
+            .clock
+            .map_or(self.frames_written, |clock| clock.frame_at(at, fps));
         let record = TraceRecord {
             schema: TRACE_SCHEMA,
             elapsed_ns,
-            film_frame: self.frames_written,
+            film_frame,
             event,
         };
         serde_json::to_writer(&mut self.trace, &record).map_err(|source| Error::Verdict {
@@ -340,7 +367,12 @@ impl Recorder {
 
 impl StoryObserver for Recorder {
     fn observe(&mut self, event: StoryEvent<'_>, surface: StorySurface<'_>) -> Result<()> {
-        self.trace(event)?;
+        let at = Instant::now();
+        match self.clock {
+            None => self.clock = Some(FilmClock::start(at, self.frames_written)),
+            Some(_) => self.catch_up(surface)?,
+        }
+        self.trace(event, at)?;
         match event {
             StoryEvent::Cue(StoryCue::Chapter { title }) => self.chapter(surface, title),
             StoryEvent::Cue(StoryCue::Hold { duration }) => self.rest(surface, duration),
@@ -362,13 +394,76 @@ impl StoryObserver for Recorder {
         }
     }
 
+    /// Sample whatever ticks fell due while the story waits on the product.
+    fn awaiting(&mut self, surface: StorySurface<'_>) -> Result<()> {
+        self.catch_up(surface)
+    }
+
     /// Close one launch's segment. The take stays open for a relaunch until
     /// [`Recorder::publish`] seals it.
-    fn finish(&mut self, _surface: StorySurface<'_>) -> Result<()> {
+    fn finish(&mut self, surface: StorySurface<'_>) -> Result<()> {
+        self.catch_up(surface)?;
+        self.clock = None;
         self.trace
             .flush()
             .map_err(|source| io("flush story event trace", &self.trace_path, source))
     }
+}
+
+/// One launch segment's film clock: tick `k` stands for `epoch + k / fps`.
+///
+/// A segment begins at its story's first event and ends at `finish`; every
+/// instant between belongs to the film, whether the story acts, rests, or
+/// waits on the product. Between segments no product surface exists, so the
+/// film cuts there and nowhere else.
+#[derive(Clone, Copy)]
+struct FilmClock {
+    epoch: Instant,
+    /// Film frames earlier segments wrote: tick `k` is frame `base + k`.
+    base: u64,
+    ticks: u64,
+}
+
+impl FilmClock {
+    const fn start(epoch: Instant, base: u64) -> Self {
+        Self {
+            epoch,
+            base,
+            ticks: 0,
+        }
+    }
+
+    /// The film frame of the first tick at or after `at`.
+    fn frame_at(self, at: Instant, fps: NonZeroU32) -> u64 {
+        let elapsed = at.saturating_duration_since(self.epoch).as_nanos();
+        let ticks = (elapsed * u128::from(fps.get())).div_ceil(1_000_000_000);
+        self.base + u64::try_from(ticks).unwrap_or(u64::MAX)
+    }
+
+    fn tick(self, index: u64, fps: NonZeroU32) -> Instant {
+        let nanos = u128::from(index) * 1_000_000_000 / u128::from(fps.get());
+        self.epoch + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    }
+
+    fn next_tick(self, fps: NonZeroU32) -> Instant {
+        self.tick(self.ticks, fps)
+    }
+
+    /// How many ticks stand at or before `now`.
+    fn due(self, now: Instant, fps: NonZeroU32) -> u64 {
+        let elapsed = now.saturating_duration_since(self.epoch).as_nanos();
+        u64::try_from(elapsed * u128::from(fps.get()) / 1_000_000_000)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1)
+    }
+}
+
+/// How far `at` lies through `begun..begun + duration`, within `[0, 1]`.
+fn progress(begun: Instant, duration: Duration, at: Instant) -> f64 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    (at.saturating_duration_since(begun).as_secs_f64() / duration.as_secs_f64()).min(1.0)
 }
 
 impl Drop for Recorder {
@@ -484,6 +579,13 @@ impl StoryObserver for Showcase {
             recorder.observe(event, surface)?;
         }
         self.darkroom.observe(event, surface)
+    }
+
+    fn awaiting(&mut self, surface: StorySurface<'_>) -> Result<()> {
+        match &mut self.recorder {
+            Some(recorder) => recorder.awaiting(surface),
+            None => Ok(()),
+        }
     }
 
     fn finish(&mut self, surface: StorySurface<'_>) -> Result<()> {
@@ -750,24 +852,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn film_clock_rounds_up_elapsed_ticks_and_preserves_tempo() {
-        let config = RecorderConfig::new("film.mp4");
-        let directory = tempfile::tempdir().expect("temporary demo directory");
-        let mut recorder = Recorder::forge(RecorderConfig {
-            output: directory.path().join(config.output),
-            ..config
-        })
-        .expect("forge recorder");
-        assert_eq!(recorder.frames(Duration::ZERO), 1);
-        assert_eq!(recorder.frames(Duration::from_millis(84)), 6);
-        assert_eq!(recorder.frames_due(Duration::ZERO), 1);
-        assert_eq!(recorder.frames_due(Duration::from_millis(16)), 1);
-        assert_eq!(recorder.frames_due(Duration::from_millis(17)), 2);
-        assert_eq!(recorder.beat(TARGET_FLIGHT), TARGET_FLIGHT);
-
-        recorder.tempo = StoryTempo::EIGHTFOLD;
-        assert_eq!(recorder.beat(TARGET_FLIGHT), Duration::from_micros(27_500));
-        assert_eq!(recorder.frames(recorder.beat(TARGET_FLIGHT)), 2);
-        assert_eq!(recorder.frames(recorder.beat(Duration::ZERO)), 1);
+    fn film_clock_counts_every_tick_at_or_before_now() {
+        let fps = NonZeroU32::new(60).expect("film rate");
+        let clock = FilmClock::start(Instant::now(), 10);
+        let at = |millis| clock.epoch + Duration::from_millis(millis);
+        assert_eq!(clock.due(clock.epoch, fps), 1);
+        assert_eq!(clock.due(at(16), fps), 1);
+        assert_eq!(clock.due(at(17), fps), 2);
+        assert_eq!(clock.due(at(8_400), fps), 505);
+        assert_eq!(clock.tick(504, fps), at(8_400));
+        assert_eq!(clock.frame_at(clock.epoch, fps), 10);
+        assert_eq!(clock.frame_at(at(1), fps), 11);
+        assert_eq!(clock.frame_at(at(8_400), fps), 514);
     }
 }

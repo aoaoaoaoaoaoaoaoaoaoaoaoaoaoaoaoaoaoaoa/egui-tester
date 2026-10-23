@@ -809,7 +809,6 @@ dependencies = [
  "font8x8",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]

@@ -33,7 +33,7 @@ use crate::{
 mod controller;
 mod cursor;
 mod embedded;
-mod keysym;
+mod keymap;
 mod pixels;
 mod window;
 
@@ -410,6 +410,7 @@ impl X11Controller {
 
     pub fn chord(&self, modifiers: Modifiers, key: Key) -> Result<ActionReceipt> {
         let keysym = key.keysym()?;
+        self.lend([keysym])?;
         let (keycode, shift) = self.keycode(keysym)?;
         let modifiers = if shift {
             modifiers | Modifiers::SHIFT
@@ -430,7 +431,9 @@ impl X11Controller {
     }
 
     pub fn key_down(&self, key: Key) -> Result<ActionReceipt> {
-        let (keycode, shift) = self.keycode(key.keysym()?)?;
+        let keysym = key.keysym()?;
+        self.lend([keysym])?;
+        let (keycode, shift) = self.keycode(keysym)?;
         if shift {
             return Err(Error::Unsupported {
                 capability: "held shifted key",
@@ -444,7 +447,9 @@ impl X11Controller {
     }
 
     pub fn key_up(&self, key: Key) -> Result<ActionReceipt> {
-        let (keycode, shift) = self.keycode(key.keysym()?)?;
+        let keysym = key.keysym()?;
+        self.lend([keysym])?;
+        let (keycode, shift) = self.keycode(keysym)?;
         if shift {
             return Err(Error::Unsupported {
                 capability: "held shifted key",
@@ -458,6 +463,11 @@ impl X11Controller {
     }
 
     pub fn type_text(&self, text: &str) -> Result<ActionReceipt> {
+        self.lend(
+            text.chars()
+                .map(|character| Key::Character(character).keysym())
+                .collect::<Result<Vec<_>>>()?,
+        )?;
         let mut receipt =
             ActionReceipt::begin(format!("type {} character(s)", text.chars().count()));
         let mut characters = text.chars().peekable();
@@ -704,34 +714,6 @@ impl X11Controller {
             .map_err(|err| x11("inject XTEST input", err))?
             .check()
             .map_err(|err| x11("inject XTEST input", err))
-    }
-
-    fn keycode(&self, symbol: Keysym) -> Result<(u8, bool)> {
-        let setup = self.connection.setup();
-        let count = setup.max_keycode - setup.min_keycode + 1;
-        let mapping = self
-            .connection
-            .get_keyboard_mapping(setup.min_keycode, count)
-            .map_err(|err| x11("read keyboard map", err))?
-            .reply()
-            .map_err(|err| x11("read keyboard map", err))?;
-        let stride = usize::from(mapping.keysyms_per_keycode);
-        for (row, symbols) in mapping.keysyms.chunks(stride).enumerate() {
-            if let Some(column) = symbols
-                .iter()
-                .position(|candidate| *candidate == symbol.raw())
-            {
-                let row = u8::try_from(row).map_err(|err| Error::X11 {
-                    operation: "resolve key",
-                    detail: err.to_string(),
-                })?;
-                return Ok((setup.min_keycode + row, column % 2 == 1));
-            }
-        }
-        Err(Error::Unsupported {
-            capability: "keyboard symbol",
-            detail: format!("the X11 keymap has no binding for {symbol:?}"),
-        })
     }
 
     fn flush(&self, operation: &'static str) -> Result<()> {

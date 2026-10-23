@@ -75,13 +75,15 @@ fn drives_real_input_and_observes_pixels() {
             |frame| frame.state["text_focused"] == true,
         )
         .expect("observe text focus");
-    let _typed_text = session.type_text("blade").expect("inject keyboard text");
+    // The private keymap binds neither '·' nor 'ß'; typing them proves the
+    // harness lends keycodes for Latin-1 symbols the layout lacks.
+    let _typed_text = session.type_text("blade·ß").expect("inject keyboard text");
     let _typed = probe
         .wait(
             &app,
             Duration::from_secs(3),
             "text field to contain injected text",
-            |frame| frame.state["text"] == "blade",
+            |frame| frame.state["text"] == "blade·ß",
         )
         .expect("observe keyboard input");
     let _select = session

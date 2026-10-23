@@ -68,7 +68,9 @@ not explicit chapter or hold durations. Terminate the product, then call
 application lifecycle. The same scenario function must remain callable with
 `Silent`.
 Recording observers are rejected on production performance rails. The recorder
-samples continuously against its invariant film clock; use
+samples continuously against its invariant film clock, through the story's
+waits as well as its acts, so a showcase cannot hide how long the product
+works; pace it with tempo and holds. Use
 `EncodingProfile::Proof` for routine evidence and opt presentation artifacts
 into `EncodingProfile::Showpiece`. Independently, `Overlay::Diagnostic`, the
 default, marks targets, the pointer, actions, and chapter titles so a proof

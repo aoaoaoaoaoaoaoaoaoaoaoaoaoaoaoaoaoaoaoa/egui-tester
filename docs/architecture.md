@@ -217,7 +217,11 @@ the pointer out of frame, and a still carries no hover state. It is no
 `Choreography` act, because Android has no pointer to withdraw. The
 recorder samples the product continuously against an invariant output clock so
 ambient animation remains temporally honest between semantic events, even when
-a capture misses one tick. The showpiece rail keeps that live clock upstream of
+a capture misses one tick. Each launch segment keeps one film clock from its
+first event to `Story::finish`. Every story wait offers its observer
+`StoryObserver::awaiting` between journal polls, so the film keeps sampling
+while the story waits on the product, and loading keeps its real duration. A
+take cuts only between segments, where no product surface exists. The showpiece rail keeps that live clock upstream of
 compression by staging lossless RGB and performing the expensive presentation
 transcode only after story execution and product teardown. `Story::finish`
 closes one launch's segment, so a take may continue through a relaunch; after

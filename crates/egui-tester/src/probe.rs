@@ -15,6 +15,9 @@ use serde_json::Value;
 
 use crate::{ActionReceipt, Application, Error, ReactionBudget, Result, Timed, error::io};
 
+/// Interval between reads of a sealed journal while a wait is unsatisfied.
+const POLL: Duration = Duration::from_millis(8);
+
 /// One sealed observation from the standard semantic journal.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProbeFrame<S = Value> {
@@ -150,9 +153,13 @@ impl<S: DeserializeOwned> Probe<S> {
         description: impl Into<String>,
         mut predicate: impl FnMut(&ProbeFrame<S>) -> bool,
     ) -> Result<ProbeFrame<S>> {
-        self.wait_inspecting(app, timeout, description, |frame| {
-            predicate(frame).then_some(()).ok_or(None)
-        })
+        self.wait_inspecting(
+            app,
+            timeout,
+            description,
+            |frame| predicate(frame).then_some(()).ok_or(None),
+            rest,
+        )
     }
 
     pub fn wait_checked(
@@ -162,17 +169,23 @@ impl<S: DeserializeOwned> Probe<S> {
         description: impl Into<String>,
         mut predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
     ) -> Result<ProbeFrame<S>> {
-        self.wait_inspecting(app, timeout, description, |frame| {
-            predicate(frame).map_err(Some)
-        })
+        self.wait_inspecting(
+            app,
+            timeout,
+            description,
+            |frame| predicate(frame).map_err(Some),
+            rest,
+        )
     }
 
-    fn wait_inspecting(
+    /// The one inspection loop; `pace` runs between polls.
+    pub(crate) fn wait_inspecting(
         &mut self,
         app: &Application<'_>,
         timeout: Duration,
         description: impl Into<String>,
         mut inspect: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), Option<String>>,
+        mut pace: impl FnMut() -> Result<()>,
     ) -> Result<ProbeFrame<S>> {
         let description = description.into();
         let deadline = Instant::now() + timeout;
@@ -207,7 +220,7 @@ impl<S: DeserializeOwned> Probe<S> {
                     },
                 ));
             }
-            thread::sleep(Duration::from_millis(8));
+            pace()?;
         }
     }
 
@@ -217,10 +230,24 @@ impl<S: DeserializeOwned> Probe<S> {
         name: &str,
         timeout: Duration,
     ) -> Result<Anchor> {
+        self.wait_anchor_paced(app, name, timeout, rest)
+    }
+
+    pub(crate) fn wait_anchor_paced(
+        &mut self,
+        app: &Application<'_>,
+        name: &str,
+        timeout: Duration,
+        pace: impl FnMut() -> Result<()>,
+    ) -> Result<Anchor> {
         admit(name)?;
-        let frame = self.wait(app, timeout, format!("witness anchor `{name}`"), |frame| {
-            frame.anchor(name).is_some()
-        })?;
+        let frame = self.wait_inspecting(
+            app,
+            timeout,
+            format!("witness anchor `{name}`"),
+            |frame| frame.anchor(name).map(drop).ok_or(None),
+            pace,
+        )?;
         frame.anchor(name).cloned().ok_or_else(|| Error::Probe {
             path: self.path.clone(),
             detail: format!("anchor `{name}` vanished from the matching frame"),
@@ -300,7 +327,19 @@ impl<S: DeserializeOwned> Probe<S> {
         timeout: Duration,
         quiet: Duration,
         description: impl Into<String>,
+        project: impl FnMut(&ProbeFrame<S>) -> Option<T>,
+    ) -> Result<ProbeFrame<S>> {
+        self.wait_stable_paced(app, timeout, quiet, description, project, rest)
+    }
+
+    pub(crate) fn wait_stable_paced<T: PartialEq>(
+        &mut self,
+        app: &Application<'_>,
+        timeout: Duration,
+        quiet: Duration,
+        description: impl Into<String>,
         mut project: impl FnMut(&ProbeFrame<S>) -> Option<T>,
+        mut pace: impl FnMut() -> Result<()>,
     ) -> Result<ProbeFrame<S>> {
         let description = description.into();
         let deadline = Instant::now() + timeout;
@@ -336,7 +375,7 @@ impl<S: DeserializeOwned> Probe<S> {
                     timeout,
                 });
             }
-            thread::sleep(Duration::from_millis(8));
+            pace()?;
         }
     }
 
@@ -366,7 +405,19 @@ impl<S: DeserializeOwned> Probe<S> {
         receipt: &ActionReceipt,
         budget: ReactionBudget,
         description: impl Into<String>,
+        predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
+    ) -> Result<Timed<ProbeFrame<S>>> {
+        self.wait_budgeted_paced(app, receipt, budget, description, predicate, rest)
+    }
+
+    pub(crate) fn wait_budgeted_paced(
+        &mut self,
+        app: &Application<'_>,
+        receipt: &ActionReceipt,
+        budget: ReactionBudget,
+        description: impl Into<String>,
         mut predicate: impl FnMut(&ProbeFrame<S>) -> std::result::Result<(), String>,
+        mut pace: impl FnMut() -> Result<()>,
     ) -> Result<Timed<ProbeFrame<S>>> {
         let description = description.into();
         let prior = self.cursor.surface_sequence;
@@ -405,7 +456,7 @@ impl<S: DeserializeOwned> Probe<S> {
                     },
                 ));
             }
-            thread::sleep(Duration::from_millis(8));
+            pace()?;
         }
     }
 
@@ -648,6 +699,17 @@ impl<S: DeserializeOwned> LegacyProbe<S> {
             |frame| frame.frame > prior,
         )
     }
+}
+
+/// Rest one poll interval between journal reads: the pace of a wait no story
+/// observer shares.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every wait's pace shares the fallible shape a story observer needs"
+)]
+pub(crate) fn rest() -> Result<()> {
+    thread::sleep(POLL);
+    Ok(())
 }
 
 /// Refuse a lookup no witness can satisfy: an off-grammar Target name.

@@ -17,8 +17,9 @@ X11 is the complete, release-tested vertical:
   1600×1000 screen exceeds the line's 1440×920 window, so the pointer can
   always leave it, and its root carries a desktop session's themed pointer;
 - XTEST clicks, held-button drags, strokes, wheels, pointer departure,
-  modifiers, named navigation keys including Space, function keys, and Latin-1
-  keyboard input;
+  modifiers, named navigation keys including Space, function keys, and every
+  printable Latin-1 character, lending spare keycodes to symbols the private
+  keymap lacks;
 - exact window discovery, focus, RGBA capture, tolerant regional pixel
   comparison, embedded-window eviction and redock, and PNG artifacts;
 - a private XDG tree, mount and network namespaces, a transient user-service
@@ -118,7 +119,9 @@ stream at effectively zero cost during ordinary tests.
 
 The recorder samples the live product continuously against an invariant 60 fps
 film clock; ambient animation never degenerates into repeated semantic-event
-stills, and a tardy capture cannot dilate world time. `EncodingProfile::Proof`
+stills, and a tardy capture cannot dilate world time. The clock runs through
+the story's waits too: loading and other product work keep their real duration
+in the film. `EncodingProfile::Proof`
 keeps routine recorded tests cheap, while `EncodingProfile::Showpiece` selects slow,
 animation-tuned compression for presentation artifacts. Showpiece capture is
 first sealed into a lossless RGB staging film, then transcoded offline; final
