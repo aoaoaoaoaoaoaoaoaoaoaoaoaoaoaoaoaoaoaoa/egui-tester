@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::{
     ActionReceipt, Choreography, Error, Frame, Result, Silent, StoryCue, StoryEvent, StoryFact,
-    StoryObserver, StorySurface, StoryTempo,
+    StoryObserver, StorySurface, StoryTempo, X11CursorImage,
     story::{CaptureSurface, still_cue},
 };
 
@@ -457,6 +457,10 @@ impl CaptureSurface for AndroidSession<'_> {
             source,
         })?;
         Frame::load_png(png.path())
+    }
+
+    fn cursor(&self) -> Result<Option<X11CursorImage>> {
+        Ok(None)
     }
 }
 

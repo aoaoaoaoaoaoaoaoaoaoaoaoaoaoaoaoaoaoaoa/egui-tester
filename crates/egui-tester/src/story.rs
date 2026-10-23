@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::{
     ActionReceipt, Anchor, Application, Button, Condition, Drag, Frame, Key, Modifiers, Motion,
     Probe, ProbeFrame, ReactionBudget, Result, Stroke, Testbed, Timed, Wheel, WindowQuery,
-    X11Session,
+    X11CursorImage, X11Session,
 };
 
 /// Persistent rate for observer-authored choreography.
@@ -104,15 +104,22 @@ pub enum StoryEvent<'a> {
 
 pub(crate) trait CaptureSurface {
     fn capture(&self) -> Result<Frame>;
+    fn cursor(&self) -> Result<Option<X11CursorImage>>;
 }
 
 impl CaptureSurface for X11Session<'_, '_> {
     fn capture(&self) -> Result<Frame> {
         self.capture_ephemeral()
     }
+
+    fn cursor(&self) -> Result<Option<X11CursorImage>> {
+        self.cursor_image().map(Some)
+    }
 }
 
-/// Capture-only view of the private product surface offered to observers.
+/// Capture-only view of the private product surface offered to observers:
+/// its pixels and the pointer bitmap the display server presents over them.
+/// Neither read injects input or mutates the product.
 #[derive(Clone, Copy)]
 pub struct StorySurface<'a> {
     surface: &'a dyn CaptureSurface,
@@ -125,6 +132,12 @@ impl StorySurface<'_> {
 
     pub fn capture(self) -> Result<Frame> {
         self.surface.capture()
+    }
+
+    /// The display server's pointer bitmap at this instant, or `None` on a
+    /// projection that presents no pointer, such as Android touch.
+    pub fn cursor(self) -> Result<Option<X11CursorImage>> {
+        self.surface.cursor()
     }
 }
 

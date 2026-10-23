@@ -614,13 +614,15 @@ impl Xvfb {
                 .map_err(|err| io("spawn Xvfb", "Xvfb", err))?;
             let socket = PathBuf::from(format!("/tmp/.X11-unix/X{display}"));
             if wait_x11(&mut child, &socket, &cookie, Duration::from_secs(3))? {
-                return Ok(Self {
+                let server = Self {
                     child,
                     display,
                     cookie,
                     lock: PathBuf::from(format!("/tmp/.X{display}-lock")),
                     socket,
-                });
+                };
+                server.controller()?.dress_root()?;
+                return Ok(server);
             }
         }
         Err(Error::Containment {

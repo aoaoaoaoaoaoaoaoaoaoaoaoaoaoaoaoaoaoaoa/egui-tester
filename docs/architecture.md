@@ -90,7 +90,10 @@ acceptance process
 
 The application receives ordinary display-server input. Pixels cross its real
 winit, egui, renderer, surface, and X server path. The harness never calls
-product methods or exposes a mutation channel.
+product methods or exposes a mutation channel. Like a desktop session, the
+harness gives the private display's root window the themed `left_ptr`, found
+where the sandboxed product's libXcursor would look; windows that define no
+pointer inherit it instead of the bare server's `X_cursor` placeholder.
 
 The harness uses the canonical `/run/user/<uid>/bus` only to govern transient
 services. It ignores inherited desktop `DISPLAY`, session-bus, and XDG-runtime
@@ -189,14 +192,21 @@ Projection executes native input and synchronization while emitting
 editorial intent: chapters, literal holds, persistent choreography tempo, and
 named stills.
 `StoryFact` carries resolved target geometry, dispatched input receipts, and
-matched observation identity. An Observer sees only a capture-capable view of
-the product surface and gains no mutation authority.
+matched observation identity. An Observer sees only a capture-only view of
+the product surface, its pixels and the display server's pointer bitmap, and
+gains no input or mutation authority.
 
 Ordinary acceptance attaches `Silent`; film production attaches
 `egui_demo::Recorder`, and still production attaches `egui_demo::Darkroom`. All
 run the same scenario, so a recorded take remains an acceptance execution
 rather than an independently scheduled imitation. `egui_demo::Showcase` develops
-a take's stills and may record its film in the same execution. The
+a take's stills and may record its film in the same execution. A film's
+`Overlay` decides its pixels, never its clock: the diagnostic overlay marks
+aimed targets, the pointer, dispatched actions, and chapter titles; the
+presentation overlay, which showcase films use, composites only the server's
+own pointer bitmap at the film's pointer, and its chapters are rests whose
+titles stay in the trace. One score's films therefore share frame indices
+under either overlay. The
 recorder samples the product continuously against an invariant output clock so
 ambient animation remains temporally honest between semantic events, even when
 a capture misses one tick. The showpiece rail keeps that live clock upstream of

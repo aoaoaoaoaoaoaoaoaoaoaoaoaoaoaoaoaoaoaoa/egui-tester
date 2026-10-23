@@ -2,8 +2,11 @@
 //!
 //! Ordinary acceptance stories remain the source of truth. Attaching a
 //! [`Recorder`] turns the same causal event stream into an H.264 film and a
-//! JSONL execution trace; a [`Darkroom`] develops every still the score names.
+//! JSONL execution trace, painted with a diagnostic or presentation
+//! [`Overlay`]; a [`Darkroom`] develops every still the score names.
 //! Neither grants any new product authority, and both may share one take.
+
+mod overlay;
 
 use std::{
     fs::{self, File},
@@ -19,8 +22,10 @@ use egui_tester::{
     Anchor, Error, Frame, Result, StoryCue, StoryEvent, StoryFact, StoryObserver, StorySurface,
     StoryTempo, demand,
 };
-use font8x8::{BASIC_FONTS, UnicodeFonts as _};
 use serde::Serialize;
+
+pub use overlay::Overlay;
+use overlay::{Canvas, Paint, Point, Rect, Scene};
 
 const TRACE_SCHEMA: &str = "egui-demo.trace/4";
 const TARGET_FLIGHT: Duration = Duration::from_millis(220);
@@ -29,11 +34,13 @@ const ACTION_REST: Duration = Duration::from_millis(160);
 const OBSERVATION_REST: Duration = Duration::from_millis(220);
 const CHAPTER_REST: Duration = Duration::from_millis(1_500);
 
-/// Immutable encoding policy for one story film.
+/// Immutable policy for one story film: destination, clock, overlay, and
+/// encoding.
 #[derive(Clone, Debug)]
 pub struct RecorderConfig {
     output: PathBuf,
     frames_per_second: NonZeroU32,
+    overlay: Overlay,
     encoding_profile: EncodingProfile,
 }
 
@@ -66,6 +73,7 @@ impl RecorderConfig {
         Self {
             output: output.into(),
             frames_per_second: NonZeroU32::new(60).unwrap_or(NonZeroU32::MIN),
+            overlay: Overlay::Diagnostic,
             encoding_profile: EncodingProfile::Proof,
         }
     }
@@ -73,6 +81,12 @@ impl RecorderConfig {
     #[must_use]
     pub const fn frames_per_second(mut self, frames_per_second: NonZeroU32) -> Self {
         self.frames_per_second = frames_per_second;
+        self
+    }
+
+    #[must_use]
+    pub const fn overlay(mut self, overlay: Overlay) -> Self {
+        self.overlay = overlay;
         self
     }
 
@@ -89,6 +103,7 @@ pub struct Recorder {
     trace_path: PathBuf,
     trace: BufWriter<File>,
     encoder: Option<Encoder>,
+    scratch: Vec<u8>,
     pointer: Option<Point>,
     target: Option<Rect>,
     tempo: StoryTempo,
@@ -122,6 +137,7 @@ impl Recorder {
             trace_path,
             trace,
             encoder: None,
+            scratch: Vec::new(),
             pointer: None,
             target: None,
             tempo: StoryTempo::STANDARD,
@@ -168,46 +184,49 @@ impl Recorder {
     ) -> Result<()> {
         let destination = Point::from(pointer);
         let origin = self.pointer.unwrap_or(destination);
-        self.target = anchor.map(|anchor| Rect::from(anchor.rect));
+        let target = anchor.map(|anchor| Rect::from(anchor.rect));
+        self.target = target;
         self.live_interval(surface, self.beat(TARGET_FLIGHT), |step, steps| {
-            Scene::Target {
+            Scene::Aim {
                 pointer: origin.lerp(destination, step + 1, steps),
+                target,
             }
         })?;
         self.pointer = Some(destination);
-        self.live_interval(surface, self.beat(TARGET_REST), |_, _| Scene::Target {
+        self.live_interval(surface, self.beat(TARGET_REST), |_, _| Scene::Aim {
             pointer: destination,
+            target,
         })
     }
 
-    fn action(&mut self, surface: StorySurface<'_>, pointer: Option<[i16; 2]>) -> Result<()> {
+    fn strike(&mut self, surface: StorySurface<'_>, pointer: Option<[i16; 2]>) -> Result<()> {
         if let Some(pointer) = pointer {
             self.pointer = Some(Point::from(pointer));
         }
-        let pointer = self.pointer;
+        let (pointer, target) = (self.pointer, self.target);
         self.live_interval(surface, self.beat(ACTION_REST), |phase, phases| {
-            Scene::Action {
+            Scene::Strike {
                 pointer,
+                target,
                 phase,
                 phases,
             }
         })
     }
 
-    fn observation(&mut self, surface: StorySurface<'_>) -> Result<()> {
+    fn rest(&mut self, surface: StorySurface<'_>, duration: Duration) -> Result<()> {
         let pointer = self.pointer;
-        self.live_interval(surface, self.beat(OBSERVATION_REST), |_, _| {
-            Scene::Settled { pointer }
-        })
+        self.live_interval(surface, duration, |_, _| Scene::Rest { pointer })
     }
 
+    /// A chapter rests on the surface for the same span under every overlay;
+    /// only the diagnostic overlay paints its title.
     fn chapter(&mut self, surface: StorySurface<'_>, title: &str) -> Result<()> {
-        self.live_interval(surface, CHAPTER_REST, |_, _| Scene::Chapter { title })
-    }
-
-    fn hold(&mut self, surface: StorySurface<'_>, duration: Duration) -> Result<()> {
         let pointer = self.pointer;
-        self.live_interval(surface, duration, |_, _| Scene::Settled { pointer })
+        self.live_interval(surface, CHAPTER_REST, |_, _| Scene::Chapter {
+            title,
+            pointer,
+        })
     }
 
     fn beat(&self, duration: Duration) -> Duration {
@@ -236,10 +255,11 @@ impl Recorder {
             }
             let capture_begun = Instant::now();
             let frame = surface.capture()?;
+            let paint = self.config.overlay.bind(surface)?;
             capture_cost = capture_begun.elapsed();
             let due = self.frames_due(begun.elapsed()).min(count).max(phase + 1);
             while phase < due {
-                self.write_scene(&frame, scene(phase, count))?;
+                self.write_scene(&frame, &paint, scene(phase, count))?;
                 phase += 1;
             }
         }
@@ -250,24 +270,22 @@ impl Recorder {
         Duration::from_secs_f64(1.0 / f64::from(self.config.frames_per_second.get()))
     }
 
-    fn write_scene(&mut self, frame: &Frame, scene: Scene<'_>) -> Result<()> {
-        let mut rgba = frame.rgba().to_vec();
-        paint_scene(&mut rgba, frame.width(), frame.height(), self.target, scene);
-        if self.encoder.is_none() {
-            self.encoder = Some(Encoder::ignite(
+    fn write_scene(&mut self, frame: &Frame, paint: &Paint, scene: Scene<'_>) -> Result<()> {
+        let (width, height) = (frame.width(), frame.height());
+        self.scratch.clear();
+        self.scratch.extend_from_slice(frame.rgba());
+        paint.apply(Canvas::new(&mut self.scratch, width, height), scene);
+        let encoder = match &mut self.encoder {
+            Some(encoder) => encoder,
+            vacant @ None => vacant.insert(Encoder::ignite(
                 &self.config.output,
-                frame.width(),
-                frame.height(),
+                width,
+                height,
                 self.config.frames_per_second,
                 self.config.encoding_profile,
-            )?);
-        }
-        self.encoder
-            .as_mut()
-            .ok_or_else(|| Error::Verdict {
-                detail: "egui-demo encoder vanished after ignition".to_owned(),
-            })?
-            .write(frame.width(), frame.height(), &rgba)?;
+            )?),
+        };
+        encoder.write(width, height, &self.scratch)?;
         self.frames_written += 1;
         Ok(())
     }
@@ -325,7 +343,7 @@ impl StoryObserver for Recorder {
         self.trace(event)?;
         match event {
             StoryEvent::Cue(StoryCue::Chapter { title }) => self.chapter(surface, title),
-            StoryEvent::Cue(StoryCue::Hold { duration }) => self.hold(surface, duration),
+            StoryEvent::Cue(StoryCue::Hold { duration }) => self.rest(surface, duration),
             StoryEvent::Cue(StoryCue::Tempo { tempo }) => {
                 self.tempo = tempo;
                 Ok(())
@@ -336,9 +354,11 @@ impl StoryObserver for Recorder {
                 pointer, anchor, ..
             }) => self.aim(surface, pointer, anchor),
             StoryEvent::Fact(StoryFact::ActionDispatched { pointer, .. }) => {
-                self.action(surface, pointer)
+                self.strike(surface, pointer)
             }
-            StoryEvent::Fact(StoryFact::ObservationMatched { .. }) => self.observation(surface),
+            StoryEvent::Fact(StoryFact::ObservationMatched { .. }) => {
+                self.rest(surface, self.beat(OBSERVATION_REST))
+            }
         }
     }
 
@@ -426,11 +446,13 @@ impl Showcase {
         })
     }
 
-    /// Also record the take as the showpiece `<directory>/<film>.mp4`.
+    /// Also record the take as the showpiece `<directory>/<film>.mp4`, bearing
+    /// only the display server's own pointer over the product.
     pub fn film(directory: impl Into<PathBuf>, film: &str) -> Result<Self> {
         let darkroom = Darkroom::forge(directory)?;
         let recorder = Recorder::forge(
             RecorderConfig::new(darkroom.directory.join(format!("{film}.mp4")))
+                .overlay(Overlay::Presentation)
                 .encoding_profile(EncodingProfile::Showpiece),
         )?;
         Ok(Self {
@@ -714,298 +736,6 @@ fn demand_command(output: std::process::Output, command: String) -> Result<()> {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
-}
-
-#[derive(Clone, Copy)]
-enum Scene<'a> {
-    Target {
-        pointer: Point,
-    },
-    Action {
-        pointer: Option<Point>,
-        phase: u32,
-        phases: u32,
-    },
-    Settled {
-        pointer: Option<Point>,
-    },
-    Chapter {
-        title: &'a str,
-    },
-}
-
-#[derive(Clone, Copy)]
-struct Point {
-    x: i32,
-    y: i32,
-}
-
-impl Point {
-    fn lerp(self, other: Self, step: u32, steps: u32) -> Self {
-        let step = i64::from(step);
-        let steps = i64::from(steps);
-        Self {
-            x: (i64::from(self.x) + i64::from(other.x - self.x) * step / steps) as i32,
-            y: (i64::from(self.y) + i64::from(other.y - self.y) * step / steps) as i32,
-        }
-    }
-}
-
-impl From<(i16, i16)> for Point {
-    fn from((x, y): (i16, i16)) -> Self {
-        Self {
-            x: i32::from(x),
-            y: i32::from(y),
-        }
-    }
-}
-
-impl From<[i16; 2]> for Point {
-    fn from([x, y]: [i16; 2]) -> Self {
-        Self::from((x, y))
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-impl From<[f32; 4]> for Rect {
-    fn from([left, top, right, bottom]: [f32; 4]) -> Self {
-        Self {
-            left: left.floor() as i32,
-            top: top.floor() as i32,
-            right: right.ceil() as i32,
-            bottom: bottom.ceil() as i32,
-        }
-    }
-}
-
-fn paint_scene(rgba: &mut [u8], width: u32, height: u32, target: Option<Rect>, scene: Scene<'_>) {
-    match scene {
-        Scene::Target { pointer } => {
-            if let Some(target) = target {
-                outline(rgba, width, height, target, [35, 211, 255, 210], 2);
-            }
-            ring(rgba, width, height, pointer, 8, 11, [255, 255, 255, 230]);
-            ring(rgba, width, height, pointer, 11, 14, [20, 170, 220, 210]);
-        }
-        Scene::Action {
-            pointer,
-            phase,
-            phases,
-        } => {
-            if let Some(target) = target {
-                outline(rgba, width, height, target, [35, 211, 255, 180], 2);
-            }
-            if let Some(pointer) = pointer {
-                let radius = 10 + i32::try_from(phase * 8 / phases.max(1)).unwrap_or(8);
-                ring(
-                    rgba,
-                    width,
-                    height,
-                    pointer,
-                    radius,
-                    radius + 3,
-                    [255, 206, 75, 230],
-                );
-            }
-        }
-        Scene::Settled { pointer } => {
-            if let Some(pointer) = pointer {
-                ring(rgba, width, height, pointer, 5, 8, [35, 211, 255, 150]);
-            }
-        }
-        Scene::Chapter { title } => chapter_card(rgba, width, height, title),
-    }
-}
-
-fn chapter_card(rgba: &mut [u8], width: u32, height: u32, title: &str) {
-    fill(
-        rgba,
-        width,
-        height,
-        Rect {
-            left: 0,
-            top: 0,
-            right: width as i32,
-            bottom: height as i32,
-        },
-        [4, 9, 13, 150],
-    );
-    let scale = (width / 520).clamp(2, 4) as i32;
-    let text_width = i32::try_from(title.chars().count()).unwrap_or(i32::MAX) * 8 * scale;
-    let panel_width = (text_width + 96).min(width as i32 - 64).max(240);
-    let panel_height = 8 * scale + 72;
-    let left = (width as i32 - panel_width) / 2;
-    let top = (height as i32 - panel_height) / 2;
-    fill(
-        rgba,
-        width,
-        height,
-        Rect {
-            left,
-            top,
-            right: left + panel_width,
-            bottom: top + panel_height,
-        },
-        [6, 13, 19, 225],
-    );
-    fill(
-        rgba,
-        width,
-        height,
-        Rect {
-            left,
-            top,
-            right: left + 8,
-            bottom: top + panel_height,
-        },
-        [35, 211, 255, 255],
-    );
-    text(
-        rgba,
-        width,
-        height,
-        Point {
-            x: left + 48,
-            y: top + 36,
-        },
-        title,
-        scale,
-        [235, 245, 249, 255],
-    );
-}
-
-fn text(
-    rgba: &mut [u8],
-    width: u32,
-    height: u32,
-    origin: Point,
-    text: &str,
-    scale: i32,
-    color: [u8; 4],
-) {
-    let mut x = origin.x;
-    for glyph in text
-        .chars()
-        .filter_map(|character| BASIC_FONTS.get(character))
-    {
-        for (row, bits) in glyph.into_iter().enumerate() {
-            for column in 0..8 {
-                if bits & (1 << column) == 0 {
-                    continue;
-                }
-                fill(
-                    rgba,
-                    width,
-                    height,
-                    Rect {
-                        left: x + column * scale,
-                        top: origin.y + row as i32 * scale,
-                        right: x + (column + 1) * scale,
-                        bottom: origin.y + (row as i32 + 1) * scale,
-                    },
-                    color,
-                );
-            }
-        }
-        x += 8 * scale;
-    }
-}
-
-fn outline(rgba: &mut [u8], width: u32, height: u32, rect: Rect, color: [u8; 4], stroke: i32) {
-    fill(
-        rgba,
-        width,
-        height,
-        Rect {
-            bottom: rect.top + stroke,
-            ..rect
-        },
-        color,
-    );
-    fill(
-        rgba,
-        width,
-        height,
-        Rect {
-            top: rect.bottom - stroke,
-            ..rect
-        },
-        color,
-    );
-    fill(
-        rgba,
-        width,
-        height,
-        Rect {
-            right: rect.left + stroke,
-            ..rect
-        },
-        color,
-    );
-    fill(
-        rgba,
-        width,
-        height,
-        Rect {
-            left: rect.right - stroke,
-            ..rect
-        },
-        color,
-    );
-}
-
-fn ring(
-    rgba: &mut [u8],
-    width: u32,
-    height: u32,
-    center: Point,
-    inner: i32,
-    outer: i32,
-    color: [u8; 4],
-) {
-    let inner_squared = inner * inner;
-    let outer_squared = outer * outer;
-    for y in center.y - outer..=center.y + outer {
-        for x in center.x - outer..=center.x + outer {
-            let distance = (x - center.x).pow(2) + (y - center.y).pow(2);
-            if distance >= inner_squared && distance <= outer_squared {
-                blend(rgba, width, height, x, y, color);
-            }
-        }
-    }
-}
-
-fn fill(rgba: &mut [u8], width: u32, height: u32, rect: Rect, color: [u8; 4]) {
-    let left = rect.left.clamp(0, width as i32);
-    let right = rect.right.clamp(0, width as i32);
-    let top = rect.top.clamp(0, height as i32);
-    let bottom = rect.bottom.clamp(0, height as i32);
-    for y in top..bottom {
-        for x in left..right {
-            blend(rgba, width, height, x, y, color);
-        }
-    }
-}
-
-fn blend(rgba: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: [u8; 4]) {
-    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
-        return;
-    }
-    let offset = (y as usize * width as usize + x as usize) * 4;
-    let alpha = u16::from(color[3]);
-    for channel in 0..3 {
-        let under = u16::from(rgba[offset + channel]);
-        let over = u16::from(color[channel]);
-        rgba[offset + channel] = ((over * alpha + under * (255 - alpha)) / 255) as u8;
-    }
-    rgba[offset + 3] = 255;
 }
 
 fn io(operation: &'static str, path: impl Into<PathBuf>, source: std::io::Error) -> Error {

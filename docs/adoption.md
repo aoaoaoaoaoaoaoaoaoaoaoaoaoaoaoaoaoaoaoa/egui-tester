@@ -64,7 +64,11 @@ application lifecycle. The same scenario function must remain callable with
 Recording observers are rejected on production performance rails. The recorder
 samples continuously against its invariant film clock; use
 `EncodingProfile::Proof` for routine evidence and opt presentation artifacts
-into `EncodingProfile::Showpiece`.
+into `EncodingProfile::Showpiece`. Independently, `Overlay::Diagnostic`, the
+default, marks targets, the pointer, actions, and chapter titles so a proof
+film shows what the story aimed at, while `Overlay::Presentation` paints only
+the X server's own pointer bitmap; there a chapter is a rest on the live
+surface, and its title stays in the trace.
 The latter records through a lossless RGB staging film before its slow final
 transcode, preserving real-time sampling under expensive compression.
 
@@ -76,7 +80,8 @@ semantic acts against a specimen world: operator-owned data borrowed read-only
 or copied private, with host networking admitted only where the data itself
 lives. It names the product's portfolio still `frontispiece`. The acceptance
 executable exposes it as `--stills DIR`, through `egui_demo::Showcase::stills`,
-and `--film DIR`, through `Showcase::film`, which records the same take.
+and `--film DIR`, through `Showcase::film`, which records the same take as a
+showpiece film with the presentation overlay.
 A showcase presents; it is no verdict and stays out of the default suite.
 
 An Android performance run attaches `AndroidPerfetto` to

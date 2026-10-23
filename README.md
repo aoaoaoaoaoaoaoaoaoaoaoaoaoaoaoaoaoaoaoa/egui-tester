@@ -13,7 +13,8 @@ acceptance vocabulary and Target wire grammar.
 
 X11 is the complete, release-tested vertical:
 
-- authenticated private Xvfb, never the caller's `DISPLAY`;
+- authenticated private Xvfb, never the caller's `DISPLAY`, whose root carries
+  a desktop session's themed pointer;
 - XTEST clicks, held-button drags, strokes, wheels, pointer departure,
   modifiers, named navigation keys including Space, function keys, and Latin-1
   keyboard input;
@@ -123,6 +124,11 @@ first sealed into a lossless RGB staging film, then transcoded offline; final
 compression therefore cannot throttle or distort the live story clock. End
 the story, terminate the product, then call `Recorder::publish` so the offline
 transcode never competes with an idle renderer.
+
+`Overlay::Diagnostic`, the default, marks aimed targets, the pointer, dispatched
+actions, and chapter titles. `Overlay::Presentation`, used by
+`Showcase::film`, composites only the X server's own pointer bitmap. An
+overlay changes pixels, never the film clock.
 
 Recording is barred from production latency adjudication because synchronous
 capture changes wall time. The trace records what one execution did; it is not
