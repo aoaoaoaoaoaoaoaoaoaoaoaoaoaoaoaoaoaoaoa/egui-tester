@@ -281,11 +281,13 @@ may continue through a relaunch; after the product terminates,
 `Recorder::publish` seals the capture and performs the offline artifact work.
 Every artifact develops in a staging directory beside its destination and is
 renamed into place only on publication, so an abandoned take leaves nothing
-behind that passes for a finished one. A live take holds a lock inside its
-staging; each new stage sweeps away staging no live take holds, which a
-killed take leaves. The one exception to discarding is a proof film dropped
-unpublished: a failed take is when proof matters, so it is finalized with its
-trace under an `-abandoned` stem. An unpublished showpiece is discarded.
+behind that passes for a finished one. A staging directory forms under
+another name, locks inside, and only then takes the name each new stage
+sweeps: a sweep removes staging no live take holds, which a killed take
+leaves, and never staging still forming. The one exception to discarding is a
+proof film dropped unpublished: a failed take is when proof matters, so it is
+finalized with its trace under an `-abandoned` stem, until a published take of
+the same film retires it. An unpublished showpiece is discarded.
 Facts are serializable provenance, not executable commands. Deterministic
 replay remains a separate policy problem because targets may move and waits
 may resolve along different lawful paths.

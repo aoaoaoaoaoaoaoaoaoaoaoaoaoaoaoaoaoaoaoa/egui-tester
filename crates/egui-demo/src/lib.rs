@@ -27,7 +27,6 @@ use egui_tester::{
     StoryObserver, StorySurface, StoryTempo,
 };
 use serde::Serialize;
-use tempfile::TempDir;
 
 pub use overlay::Overlay;
 use overlay::{Canvas, Paint, Point, Rect, Scene};
@@ -38,9 +37,11 @@ const TARGET_REST: Duration = Duration::from_millis(100);
 const ACTION_REST: Duration = Duration::from_millis(160);
 const OBSERVATION_REST: Duration = Duration::from_millis(220);
 const CHAPTER_REST: Duration = Duration::from_millis(1_500);
-/// Name prefix of every staging directory, and the lock file inside each.
+/// Name prefix of every staging directory, the lock file inside each, and
+/// the prefix a staging directory forms under, out of a sweep's reach.
 const STAGING_PREFIX: &str = ".egui-demo-";
 const STAGING_LOCK: &str = ".lock";
+const FORMING_PREFIX: &str = ".egui-forming-";
 
 /// Immutable policy for one story film: destination, clock, overlay, and
 /// encoding.
@@ -170,9 +171,10 @@ impl Recorder {
     }
 
     /// Seal the take and publish its film, then its trace, returning both
-    /// paths. Call this after terminating the product: a take may span
-    /// relaunches, and an offline showpiece transcode must not contend with an
-    /// idle live app.
+    /// paths and retiring any `-abandoned` film and trace an earlier failed
+    /// take left there. Call this after terminating the product: a take may
+    /// span relaunches, and an offline showpiece transcode must not contend
+    /// with an idle live app.
     pub fn publish(mut self) -> Result<Vec<PathBuf>> {
         self.trace
             .flush()
@@ -185,6 +187,9 @@ impl Recorder {
         let trace = trace_path(&film);
         promote(&staged(&self.staging, &film), &film)?;
         promote(&self.trace_path, &trace)?;
+        let stale = abandoned(&film);
+        let _stale = fs::remove_file(trace_path(&stale));
+        let _stale = fs::remove_file(stale);
         Ok(vec![film, trace])
     }
 
@@ -914,15 +919,22 @@ fn abandoned(film: &Path) -> PathBuf {
 }
 
 /// A take's staging directory beside its artifacts' destination, locked for
-/// as long as the take lives, so a later take can tell it from a dead one's.
+/// as long as the take lives, so a later take can tell it from a dead one's,
+/// and removed when the take drops it.
 struct Staging {
-    directory: TempDir,
+    path: PathBuf,
     _lock: File,
 }
 
 impl Staging {
     fn path(&self) -> &Path {
-        self.directory.path()
+        &self.path
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let _removed = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -933,23 +945,31 @@ fn stage(directory: &Path) -> Result<Staging> {
     fs::create_dir_all(directory)
         .map_err(|source| io("create artifact directory", directory, source))?;
     sweep(directory);
-    let staging = tempfile::Builder::new()
-        .prefix(STAGING_PREFIX)
+    let forming = tempfile::Builder::new()
+        .prefix(FORMING_PREFIX)
         .tempdir_in(directory)
         .map_err(|source| io("create artifact staging directory", directory, source))?;
-    let lock_path = staging.path().join(STAGING_LOCK);
+    let lock_path = forming.path().join(STAGING_LOCK);
     let lock = File::create(&lock_path)
         .map_err(|source| io("create artifact staging lock", &lock_path, source))?;
     lock.try_lock()
         .map_err(|error| io("lock artifact staging", &lock_path, error.into()))?;
-    Ok(Staging {
-        directory: staging,
-        _lock: lock,
-    })
+    let name = forming
+        .path()
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let path = directory.join(name.replacen(FORMING_PREFIX, STAGING_PREFIX, 1));
+    fs::rename(forming.path(), &path)
+        .map_err(|source| io("name artifact staging directory", &path, source))?;
+    let _formed = forming.keep();
+    Ok(Staging { path, _lock: lock })
 }
 
 /// Remove, best effort, every staging directory in `directory` whose lock no
-/// live take holds. One still being created has no lock yet and stays.
+/// live take holds. A staging directory takes the swept name only once its
+/// take holds the lock, so none is swept while it forms; one whose take was
+/// killed while forming keeps its forming name, and stays.
 fn sweep(directory: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
@@ -1022,5 +1042,25 @@ mod tests {
         assert_eq!(clock.frame_at(clock.epoch, fps), 10);
         assert_eq!(clock.frame_at(at(1), fps), 11);
         assert_eq!(clock.frame_at(at(8_400), fps), 514);
+    }
+
+    #[test]
+    fn stage_sweeps_only_staging_no_live_take_holds() {
+        let root = tempfile::tempdir().expect("artifact directory");
+        let forming = root.path().join(format!("{FORMING_PREFIX}killed"));
+        let dead = root.path().join(format!("{STAGING_PREFIX}killed"));
+        for killed in [&forming, &dead] {
+            fs::create_dir(killed).expect("killed staging");
+            fs::write(killed.join(STAGING_LOCK), b"").expect("unheld lock");
+        }
+        let live = stage(root.path()).expect("live staging");
+        let next = stage(root.path()).expect("next staging");
+        assert!(live.path().exists() && forming.exists() && !dead.exists());
+        let name = next
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        assert!(name.starts_with(STAGING_PREFIX));
     }
 }

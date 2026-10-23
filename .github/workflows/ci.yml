@@ -47,8 +47,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry
-          # The fleet branch as it raised Rust 1.99.0; this repository has no
-          # toolchain file of its own. Advance it with each fleet compiler raise.
+          # The Foundry commit that raised the fleet compiler to Rust 1.99.0,
+          # reachable from its main; this repository has no toolchain file of
+          # its own. Advance it with each fleet compiler raise.
           ref: bdd2594614b8ab52cc47a22b5b4121cb2cdd1b53
           path: .foundry
           persist-credentials: false
