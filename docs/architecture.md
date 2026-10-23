@@ -190,15 +190,29 @@ requested state is ready. Synchronize through a presented semantic predicate,
 then judge a bounded region with a tolerant feature or change predicate, or use
 an external effect. Production motion remains enabled during acceptance.
 
-A still's rest keeps that law. Before its cue, `Story::still` waits until no
-pass presented for 400 ms moved an anchor or changed the Observation, then
-publishes whatever the surface shows, ambient water included. It reads
-witnessed passes, never pixels, and it is an editorial guard, not a verdict.
-Neither pixels nor pass silence could serve: water presents a pass every
-100–250 ms on the testbed renderer, indefinitely. A presentation that never
-rests fails the story with its pass rate, the age of its last pass, the anchors
-that moved, and how often the state changed. Android's projection reads no
-witness, so its still cannot rest; its score settles first.
+A still's rest keeps that law. Before its cue, `Story::still` waits until, for
+400 ms, no presented pass moved an anchor, changed the Observation, or was
+astir, and the newest pass is calm; it then publishes whatever the surface
+shows. It reads witnessed passes, never pixels, and it is an editorial guard,
+not a verdict. Neither pixels nor pass silence could serve: lawful animation
+keeps presenting passes that change nothing a still must wait for.
+
+A pass is **astir** when its host declares, through `PendingFrame::astir`,
+that presentation motion the host drives is under way and has asked for the
+next pass. Visual-only motion, such as water settling after a touch, moves no
+anchor and changes no Observation, so only the host can declare it. A Brass
+host declares a pass astir while its water is awake
+(`water::Frame::wants_repaint`): up to 14 s after a disturbance, and for as
+long as a loading raft shows. Ambient water is what the host does not declare:
+calm water asks for no pass, and the water drawn in a pass something else
+asked for, such as a caret's blink, belongs to the still. A host that declares
+nothing leaves every pass calm, so its visual-only motion goes unguarded after
+the 400 ms. The still timeout, 20 s unless `Story::with_still_timeout` says
+otherwise, outlasts awake water. A presentation that never rests within it
+fails the story with its pass rate, the age of its last pass, how many passes
+were astir, the anchors that moved, and how often the state changed. Android's
+projection reads no witness, so its still cannot rest; its score settles
+first.
 
 A `Reaction` considers only frames newer than its prior cursor and with product
 timestamps after the gesture trigger. This is temporal eligibility, not proof

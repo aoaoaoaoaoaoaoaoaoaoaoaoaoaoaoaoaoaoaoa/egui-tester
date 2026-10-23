@@ -144,6 +144,7 @@ pub struct PendingFrame<T> {
     pixels_per_point: f32,
     anchors: Vec<Anchor>,
     state: T,
+    astir: bool,
 }
 
 impl<T> PendingFrame<T> {
@@ -196,7 +197,19 @@ impl<T> PendingFrame<T> {
             pixels_per_point,
             anchors,
             state,
+            astir: false,
         })
+    }
+
+    /// Declare whether the host's presentation is astir in this pass: in
+    /// motion the host drives and has asked another pass to continue, such as
+    /// water settling after a touch. A still waits until no pass is astir.
+    /// Ambient animation the host does not declare stays calm, as does every
+    /// pass of a host that declares nothing.
+    #[must_use]
+    pub const fn astir(mut self, astir: bool) -> Self {
+        self.astir = astir;
+        self
     }
 
     #[must_use]
@@ -435,6 +448,7 @@ impl Writer {
             ppp: pending.pixels_per_point,
             anchors: &pending.anchors,
             state: &pending.state,
+            astir: pending.astir,
         };
         let bytes = serde_json::to_vec(&wire)?;
         append_observation(&mut self.observations, &self.path, &bytes)?;
@@ -505,6 +519,10 @@ struct WireFrame<'a, T> {
     ppp: f32,
     anchors: &'a [Anchor],
     state: &'a T,
+    /// Absent when calm, so a calm pass keeps the wire of hosts that declare
+    /// nothing.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    astir: bool,
 }
 
 /// Incremental reader for the canonical semantic observation journal.

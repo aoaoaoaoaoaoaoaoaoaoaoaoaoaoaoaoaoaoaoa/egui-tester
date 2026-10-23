@@ -31,6 +31,10 @@ pub struct ProbeFrame<S = Value> {
     pub ppp: f32,
     pub anchors: Vec<Anchor>,
     pub state: S,
+    /// Whether the host declared its presentation in motion during this
+    /// pass. A host that declares nothing leaves every pass calm.
+    #[serde(default)]
+    pub astir: bool,
 }
 
 impl<S> ProbeFrame<S> {
@@ -381,8 +385,9 @@ impl<S: DeserializeOwned> Probe<S> {
 
     /// Wait until the witnessed presentation rests for `quiet`: across every
     /// pass presented meanwhile, no anchor moved, appeared, vanished, or
-    /// changed focus, and the product state held. Passes that change neither,
-    /// such as ambient water, do not disturb the rest.
+    /// changed focus, the product state held, and the host declared no pass
+    /// astir, the newest included: an astir pass promises another. Passes
+    /// that do none of these, such as ambient water, do not disturb the rest.
     pub(crate) fn wait_rest_paced(
         &mut self,
         app: &Application<'_>,
@@ -406,7 +411,8 @@ impl<S: DeserializeOwned> Probe<S> {
                 };
                 held = Some((frame, since));
             }
-            if let Some((_, since)) = &held
+            if let Some((frame, since)) = &held
+                && !frame.astir
                 && since.elapsed() >= quiet
             {
                 return self.current()?.ok_or_else(|| Error::Probe {
@@ -753,6 +759,7 @@ impl<S: DeserializeOwned> LegacyProbe<S> {
 struct Unrest {
     passes: u32,
     last_presented_ns: u64,
+    astir: u32,
     restated: u32,
     moved: BTreeSet<TargetName>,
 }
@@ -776,7 +783,8 @@ impl Unrest {
             .collect::<Vec<_>>();
         let restated = prior.state != frame.state;
         self.restated = self.restated.saturating_add(u32::from(restated));
-        let disturbed = restated || !moved.is_empty();
+        self.astir = self.astir.saturating_add(u32::from(frame.astir));
+        let disturbed = frame.astir || restated || !moved.is_empty();
         self.moved.extend(moved);
         disturbed
     }
@@ -785,7 +793,7 @@ impl Unrest {
         if !presented {
             return format!("no pass presented within {elapsed:.1?}");
         }
-        if self.restated == 0 && self.moved.is_empty() {
+        if self.astir == 0 && self.restated == 0 && self.moved.is_empty() {
             return format!("nothing moved, but the bound is shorter than the {quiet:?} rest");
         }
         let age = Duration::from_nanos(
@@ -807,8 +815,8 @@ impl Unrest {
             format!("anchors moved: {}", moved.join(", "))
         };
         format!(
-            "no {quiet:?} passed without change: {} passes in {elapsed:.1?} ({rate:.1}/s), the last {age:.0?} ago; {} changed the state; {moved}",
-            self.passes, self.restated
+            "no {quiet:?} passed without change: {} passes in {elapsed:.1?} ({rate:.1}/s), the last {age:.0?} ago; {} declared motion; {} changed the state; {moved}",
+            self.passes, self.astir, self.restated
         )
     }
 }
@@ -868,6 +876,7 @@ mod tests {
                 Anchor::physical("probe.same", [1.0, 1.0, 2.0, 2.0]).expect("second"),
             ],
             state: Value::Null,
+            astir: false,
         };
         assert!(probe.validate(&frame).is_err());
     }

@@ -123,7 +123,8 @@ One product frame follows this order:
    application projection needed by the observation;
 4. extract final-pass targets and project the minimal state;
 5. call `FramePulse::observe` after that projection;
-6. forge an owned `PendingFrame`;
+6. forge an owned `PendingFrame`, declaring it `astir` when presentation
+   motion the host drives has asked for the next pass;
 7. render and call the graphics surface's present operation;
 8. capture `ProductInstant::now()` and enqueue with
    `Publisher::surface_present_at`;

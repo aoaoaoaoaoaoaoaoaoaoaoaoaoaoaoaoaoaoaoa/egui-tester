@@ -231,6 +231,9 @@ pub struct Story<'app, 'bed, S, O = Silent> {
     reaction_budget: ReactionBudget,
     target_timeout: Duration,
     wait_timeout: Duration,
+    /// Bound on a still's rest. Host-declared motion outlasts ordinary waits:
+    /// Brass water stays astir for 14 s after a disturbance.
+    still_timeout: Duration,
     /// The framing imposed on the product window, and the monotonic instant
     /// it was imposed.
     framing: Option<(Framing, u64)>,
@@ -253,6 +256,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S, Silent> {
             reaction_budget,
             target_timeout: Duration::from_secs(8),
             wait_timeout: Duration::from_secs(10),
+            still_timeout: Duration::from_secs(20),
             framing: None,
         })
     }
@@ -281,6 +285,7 @@ impl<'app, 'bed, S: DeserializeOwned + 'static> Story<'app, 'bed, S, Silent> {
             reaction_budget: self.reaction_budget,
             target_timeout: self.target_timeout,
             wait_timeout: self.wait_timeout,
+            still_timeout: self.still_timeout,
             framing,
         })
     }
@@ -296,6 +301,12 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
     #[must_use]
     pub const fn with_wait_timeout(mut self, timeout: Duration) -> Self {
         self.wait_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_still_timeout(mut self, timeout: Duration) -> Self {
+        self.still_timeout = timeout;
         self
     }
 
@@ -718,15 +729,18 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
 
     /// Offer observers the presented surface as the publishable still `name`
     /// once the witnessed presentation rests: for 400 ms no presented pass
-    /// moves an anchor or changes the product state. Ambient animation that
-    /// changes neither continues into the still. The rest is an editorial
+    /// moves an anchor, changes the product state, or is declared astir by
+    /// its host, and the newest pass is calm. Ambient animation that does
+    /// none of these continues into the still. The rest is an editorial
     /// guard over witnessed passes, never a synchronization verdict, and a
-    /// presentation that never rests fails the story with what kept it moving.
+    /// presentation that never rests within the still timeout, 20 s unless
+    /// [`Self::with_still_timeout`] says otherwise, fails the story with what
+    /// kept it moving.
     pub fn still(&mut self, name: &ArtifactStem) -> Result<()> {
         let description = format!("presentation at rest for still `{name}`");
         let result = self.probe.wait_rest_paced(
             self.session.application(),
-            self.wait_timeout,
+            self.still_timeout,
             STILL_REST,
             description.clone(),
             pace(&mut self.observer, &self.session),
