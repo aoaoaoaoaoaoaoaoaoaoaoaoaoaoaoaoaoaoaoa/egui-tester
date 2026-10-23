@@ -23,7 +23,8 @@ small enums that cross the observation wire. A Target need only implement
 independent of the tester but may depend on `egui-tester-witness`, the wire
 law, without its `egui` feature: `TargetName` admits names, and
 `encode_identity` spells raw runtime identity, so no product keeps a private
-encoder. That pulls `serde`, `serde_json`, `thiserror`, and `rustix` on Unix or
+encoder. An empty identity has no spelling, so `encode_identity` returns
+`None` for it, and the product decides what an empty identity addresses. That pulls `serde`, `serde_json`, `thiserror`, and `rustix` on Unix or
 `windows-sys` on Windows. Other targets, such as wasm, compile it without the
 host clock, so the clock-reading constructors are absent there. Handwritten Rust
 is the present source of truth. Derives or a shared contract-language crate should

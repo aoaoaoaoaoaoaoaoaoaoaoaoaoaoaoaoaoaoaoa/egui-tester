@@ -30,3 +30,31 @@ jobs:
     with:
       contract: foundry-witness.toml
       namespace: witness
+
+  # The Foundry has no wasm coordinate, yet product contracts link the witness
+  # on the web too: check it there, bare and with egui, on the fleet compiler.
+  witness-wasm:
+    name: Witness on wasm32
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out egui-tester
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the Foundry
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: aoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoaoa/eternalist-foundry
+          ref: fleet
+          path: .foundry
+          persist-credentials: false
+      - name: Raise fleet compiler
+        run: sh .foundry/scripts/ci/raise-compiler
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Check witness
+        run: cargo check --locked --package egui-tester-witness --target wasm32-unknown-unknown
+      - name: Check egui witness
+        run: cargo check --locked --package egui-tester-witness --target wasm32-unknown-unknown --features egui

@@ -1,7 +1,4 @@
-use std::{
-    fmt::{self, Display, Formatter, Write as _},
-    ops::Deref,
-};
+use std::fmt::{self, Display, Formatter, Write as _};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -37,14 +34,6 @@ impl TargetName {
     #[must_use]
     pub fn into_string(self) -> String {
         self.0
-    }
-}
-
-impl Deref for TargetName {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        self.as_str()
     }
 }
 
@@ -102,9 +91,9 @@ impl TryFrom<&str> for TargetName {
 
 /// Spell one raw runtime identity as a canonical identity component: unreserved
 /// ASCII stays literal and every other byte becomes an uppercase percent escape,
-/// exactly what [`TargetName`] admits after a slash. An empty identity stays
-/// empty, which no name admits.
-pub fn encode_identity(raw: &str) -> impl Display + '_ {
+/// exactly what [`TargetName`] admits after a slash. An empty identity has no
+/// spelling, because no name admits an empty component.
+pub fn encode_identity(raw: &str) -> Option<impl Display + '_> {
     struct Encoded<'a>(&'a str);
 
     impl Display for Encoded<'_> {
@@ -123,7 +112,7 @@ pub fn encode_identity(raw: &str) -> impl Display + '_ {
         }
     }
 
-    Encoded(raw)
+    (!raw.is_empty()).then_some(Encoded(raw))
 }
 
 /// RFC 3986 unreserved ASCII: the bytes an identity spells literally.
@@ -149,11 +138,13 @@ fn validate(name: &str) -> Result<()> {
             "semantic path requires one or more kebab-case segments",
         ));
     }
-    if !parts.all(valid_identity) {
-        return Err(fault(
-            name,
-            "runtime identity is empty or not canonically encoded",
-        ));
+    for identity in parts {
+        if identity.is_empty() {
+            return Err(fault(name, "runtime identity is empty"));
+        }
+        if !canonical_identity(identity) {
+            return Err(fault(name, "runtime identity is not canonically encoded"));
+        }
     }
     Ok(())
 }
@@ -175,11 +166,8 @@ fn valid_kebab(segment: &str) -> bool {
         && !bytes.windows(2).any(|pair| pair == b"--")
 }
 
-fn valid_identity(identity: &str) -> bool {
+fn canonical_identity(identity: &str) -> bool {
     let bytes = identity.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -258,7 +246,8 @@ mod tests {
             .filter_map(char::from_u32)
         {
             let raw = format!("{character}a{character}");
-            let name = format!("owner.path/{}", encode_identity(&raw));
+            let identity = encode_identity(&raw).expect("a nonempty identity has a spelling");
+            let name = format!("owner.path/{identity}");
             assert!(TargetName::new(name).is_ok(), "refused encoded {raw:?}");
         }
     }
