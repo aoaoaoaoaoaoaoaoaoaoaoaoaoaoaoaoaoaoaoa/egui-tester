@@ -462,19 +462,18 @@ impl Showcase {
     }
 
     /// Publish every artifact of the take, film first, after the product
-    /// terminates.
+    /// terminates. A filmed take may name no stills; a stills-only take that
+    /// named none published nothing and is refused.
     pub fn publish(self) -> Result<Vec<PathBuf>> {
-        let mut artifacts = match self.recorder {
-            Some(recorder) => {
-                let recorder = recorder.publish()?;
-                vec![
-                    recorder.output().to_owned(),
-                    recorder.trace_path().to_owned(),
-                ]
-            }
-            None => Vec::new(),
+        let Some(recorder) = self.recorder else {
+            return self.darkroom.publish();
         };
-        artifacts.extend(self.darkroom.publish()?);
+        let recorder = recorder.publish()?;
+        let mut artifacts = vec![
+            recorder.output().to_owned(),
+            recorder.trace_path().to_owned(),
+        ];
+        artifacts.extend(self.darkroom.developed);
         Ok(artifacts)
     }
 }
