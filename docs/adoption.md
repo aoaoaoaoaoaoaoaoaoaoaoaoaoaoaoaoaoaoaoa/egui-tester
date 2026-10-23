@@ -75,7 +75,8 @@ transcode, preserving real-time sampling under expensive compression.
 Stills follow the same law. A score names a still with `still` after the
 condition that makes the presented state worth publishing, never after a
 sleep; `egui_demo::Darkroom` develops it as a lossless PNG of the product
-window with nothing painted over it. A product's showcase performs ordinary
+window with nothing painted over it. When hover state must not reach a still,
+the desktop projection first withdraws the pointer with `Story::leave`. A product's showcase performs ordinary
 semantic acts against a specimen world: operator-owned data borrowed read-only
 or copied private, with host networking admitted only where the data itself
 lives. It names the product's portfolio still `frontispiece`. The acceptance

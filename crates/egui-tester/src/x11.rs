@@ -33,6 +33,7 @@ use crate::{
 mod controller;
 mod cursor;
 mod embedded;
+mod keysym;
 mod pixels;
 mod window;
 
@@ -233,24 +234,6 @@ impl X11Controller {
             root_y.saturating_add(y),
         )?;
         self.flush("move pointer")
-    }
-
-    /// Move the pointer to a screen coordinate outside the client window.
-    pub fn leave(&self, window: &Window) -> Result<()> {
-        let origin = self.window_origin(window)?;
-        for point in window::exterior_candidates(&self.connection, self.screen, window.id, origin)?
-        {
-            self.fake(MOTION_NOTIFY_EVENT, 0, point.0, point.1)?;
-            self.flush("move pointer outside window")?;
-            if window::pointer_is_outside(&self.connection, window.id)? {
-                return Ok(());
-            }
-        }
-        Err(Error::X11 {
-            operation: "move pointer outside window",
-            detail: "X server kept the pointer inside the client at every exterior screen corner"
-                .to_owned(),
-        })
     }
 
     pub fn pointer(&self, window: &Window) -> Result<(i16, i16)> {
@@ -876,9 +859,19 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
 
     /// Move the pointer outside the bound client window.
     pub fn leave(&self) -> Result<ActionReceipt> {
+        self.depart(self.departure()?)
+    }
+
+    /// The window coordinate outside the bound client to which
+    /// [`Self::leave`] withdraws the pointer.
+    pub(crate) fn departure(&self) -> Result<(i16, i16)> {
+        self.controller.departure(&self.window)
+    }
+
+    pub(crate) fn depart(&self, departure: (i16, i16)) -> Result<ActionReceipt> {
         self.app.ensure_running("pointer departure")?;
-        let receipt = ActionReceipt::begin("pointer departure from window");
-        self.controller.leave(&self.window)?;
+        let receipt = ActionReceipt::begin("pointer departure");
+        self.controller.depart(&self.window, departure)?;
         let receipt = receipt.finish();
         self.record(&receipt)?;
         Ok(receipt)
@@ -1111,60 +1104,6 @@ impl<'app, 'bed> X11Session<'app, 'bed> {
         if result.is_err() {
             let _capture = self.capture();
         }
-    }
-}
-
-impl Key {
-    fn keysym(self) -> Result<Keysym> {
-        Ok(match self {
-            Self::Character(character) => {
-                if u32::from(character) > 0xff {
-                    return Err(Error::Unsupported {
-                        capability: "text input",
-                        detail: format!(
-                            "`{character}` is outside the MVP's Latin-1 X11 key injection"
-                        ),
-                    });
-                }
-                Keysym::new(u32::from(character))
-            }
-            Self::Space => Keysym::new(u32::from(' ')),
-            Self::Return => Keysym::Return,
-            Self::Escape => Keysym::Escape,
-            Self::Tab => Keysym::Tab,
-            Self::Backspace => Keysym::BackSpace,
-            Self::Delete => Keysym::Delete,
-            Self::Home => Keysym::Home,
-            Self::End => Keysym::End,
-            Self::Left => Keysym::Left,
-            Self::Right => Keysym::Right,
-            Self::Up => Keysym::Up,
-            Self::Down => Keysym::Down,
-            Self::Function(number) => match number {
-                1 => Keysym::F1,
-                2 => Keysym::F2,
-                3 => Keysym::F3,
-                4 => Keysym::F4,
-                5 => Keysym::F5,
-                6 => Keysym::F6,
-                7 => Keysym::F7,
-                8 => Keysym::F8,
-                9 => Keysym::F9,
-                10 => Keysym::F10,
-                11 => Keysym::F11,
-                12 => Keysym::F12,
-                _ => {
-                    return Err(Error::Unsupported {
-                        capability: "function key",
-                        detail: format!("F{number} is outside the portable F1–F12 set"),
-                    });
-                }
-            },
-            Self::Shift => Keysym::Shift_L,
-            Self::Control => Keysym::Control_L,
-            Self::Alt => Keysym::Alt_L,
-            Self::Super => Keysym::Super_L,
-        })
     }
 }
 

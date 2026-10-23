@@ -206,7 +206,11 @@ aimed targets, the pointer, dispatched actions, and chapter titles; the
 presentation overlay, which showcase films use, composites only the server's
 own pointer bitmap at the film's pointer, and its chapters are rests whose
 titles stay in the trace. One score's films therefore share frame indices
-under either overlay. The
+under either overlay. `Story::leave` withdraws the pointer to the screen corner
+farthest from the window and reports that departure point, in window
+coordinates, through the ordinary aimed and dispatched facts: a film glides
+the pointer out of frame, and a still carries no hover state. It is no
+`Choreography` act, because Android has no pointer to withdraw. The
 recorder samples the product continuously against an invariant output clock so
 ambient animation remains temporally honest between semantic events, even when
 a capture misses one tick. The showpiece rail keeps that live clock upstream of

@@ -402,6 +402,19 @@ impl<'app, 'bed, S: DeserializeOwned + 'static, O: StoryObserver> Story<'app, 'b
         Ok(self.reaction(receipt))
     }
 
+    /// Withdraw the pointer to the screen corner farthest from the product
+    /// window, so no hover state survives into a still and a film glides the
+    /// pointer out of frame. Observers learn the departure point in window
+    /// coordinates. Android has no pointer to withdraw, so this is no
+    /// [`Choreography`] act.
+    pub fn leave(&mut self) -> Result<Reaction<'_, 'app, 'bed, S, O>> {
+        let departure = self.session.departure()?;
+        self.aim(None, departure, None)?;
+        let receipt = self.session.depart(departure)?;
+        self.emit_action(&receipt, None, Some(departure))?;
+        Ok(self.reaction(receipt))
+    }
+
     /// Glide to a live target, then resolve it again before clicking.
     pub fn tap(
         &mut self,

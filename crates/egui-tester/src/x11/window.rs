@@ -19,7 +19,44 @@ use x11rb::{
 
 use crate::{Error, Result};
 
+use super::{Window as Client, X11Controller};
+
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(2);
+
+impl X11Controller {
+    /// Move the pointer to a screen coordinate outside the client window.
+    pub fn leave(&self, window: &Client) -> Result<()> {
+        self.depart(window, self.departure(window)?)
+    }
+
+    /// The window coordinate outside the client to which [`Self::leave`]
+    /// withdraws the pointer.
+    pub(crate) fn departure(&self, window: &Client) -> Result<(i16, i16)> {
+        let (left, top) = self.window_origin(window)?;
+        let (x, y) = exterior_corner(&self.connection, self.screen, window.id, (left, top))?;
+        x.checked_sub(left)
+            .zip(y.checked_sub(top))
+            .ok_or_else(|| Error::X11 {
+                operation: "move pointer outside window",
+                detail: format!(
+                    "departure ({x}, {y}) leaves window coordinates from origin ({left}, {top})"
+                ),
+            })
+    }
+
+    /// Move the pointer to the window coordinate `departure`, refusing if the
+    /// client still contains it.
+    pub(crate) fn depart(&self, window: &Client, (x, y): (i16, i16)) -> Result<()> {
+        self.move_to(window, x, y)?;
+        if pointer_is_outside(&self.connection, window.id)? {
+            return Ok(());
+        }
+        Err(Error::X11 {
+            operation: "move pointer outside window",
+            detail: format!("X server kept the pointer inside the client at ({x}, {y})"),
+        })
+    }
+}
 
 pub(super) fn activate(
     connection: &RustConnection,
@@ -104,12 +141,14 @@ pub(super) fn focus_unmanaged(connection: &RustConnection, window: Window) -> Re
         .map_err(|error| fault("focus window", error))
 }
 
-pub(super) fn exterior_candidates(
+/// The screen corner outside the client window farthest from its center, in
+/// root coordinates: where a departing pointer leaves no hover behind.
+fn exterior_corner(
     connection: &RustConnection,
     screen: usize,
     window: Window,
     (left, top): (i16, i16),
-) -> Result<Vec<(i16, i16)>> {
+) -> Result<(i16, i16)> {
     let geometry = connection
         .get_geometry(window)
         .map_err(|error| fault("query window geometry", error))?
@@ -121,36 +160,27 @@ pub(super) fn exterior_candidates(
         i16::try_from(screen.height_in_pixels.saturating_sub(1)).unwrap_or(i16::MAX);
     let right = i32::from(left) + i32::from(geometry.width);
     let bottom = i32::from(top) + i32::from(geometry.height);
-    let outside = |(x, y): (i16, i16)| {
-        let (x, y) = (i32::from(x), i32::from(y));
-        x < i32::from(left) || x >= right || y < i32::from(top) || y >= bottom
-    };
-    let mut candidates = [
+    let center_x = i64::from(left) + i64::from(geometry.width) / 2;
+    let center_y = i64::from(top) + i64::from(geometry.height) / 2;
+    [
         (0, 0),
         (screen_right, 0),
         (0, screen_bottom),
         (screen_right, screen_bottom),
     ]
     .into_iter()
-    .filter(|point| outside(*point))
-    .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Err(Error::X11 {
-            operation: "move pointer outside window",
-            detail: "client window covers every addressable screen corner".to_owned(),
-        });
-    }
-    let center_x = i64::from(left) + i64::from(geometry.width) / 2;
-    let center_y = i64::from(top) + i64::from(geometry.height) / 2;
-    candidates.sort_unstable_by_key(|&(x, y)| {
-        let dx = i64::from(x) - center_x;
-        let dy = i64::from(y) - center_y;
-        std::cmp::Reverse(dx * dx + dy * dy)
-    });
-    Ok(candidates)
+    .filter(|&(x, y)| {
+        let (x, y) = (i32::from(x), i32::from(y));
+        x < i32::from(left) || x >= right || y < i32::from(top) || y >= bottom
+    })
+    .max_by_key(|&(x, y)| (i64::from(x) - center_x).pow(2) + (i64::from(y) - center_y).pow(2))
+    .ok_or_else(|| Error::X11 {
+        operation: "move pointer outside window",
+        detail: "client window covers every addressable screen corner".to_owned(),
+    })
 }
 
-pub(super) fn pointer_is_outside(connection: &RustConnection, window: Window) -> Result<bool> {
+fn pointer_is_outside(connection: &RustConnection, window: Window) -> Result<bool> {
     let geometry = connection
         .get_geometry(window)
         .map_err(|error| fault("query window geometry", error))?

@@ -13,8 +13,9 @@ acceptance vocabulary and Target wire grammar.
 
 X11 is the complete, release-tested vertical:
 
-- authenticated private Xvfb, never the caller's `DISPLAY`, whose root carries
-  a desktop session's themed pointer;
+- authenticated private Xvfb, never the caller's `DISPLAY`; its default
+  1600×1000 screen exceeds the line's 1440×920 window, so the pointer can
+  always leave it, and its root carries a desktop session's themed pointer;
 - XTEST clicks, held-button drags, strokes, wheels, pointer departure,
   modifiers, named navigation keys including Space, function keys, and Latin-1
   keyboard input;

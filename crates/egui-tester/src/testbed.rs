@@ -24,6 +24,9 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 static NEXT_DISPLAY: AtomicU64 = AtomicU64::new(0);
 
 /// X11 virtual screen geometry.
+///
+/// The default screen exceeds the line's 1440×920 presentation window, so a
+/// pointer can always leave it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct X11Config {
     pub width: u16,
@@ -34,8 +37,8 @@ pub struct X11Config {
 impl Default for X11Config {
     fn default() -> Self {
         Self {
-            width: 1440,
-            height: 920,
+            width: 1600,
+            height: 1000,
             depth: 24,
         }
     }
